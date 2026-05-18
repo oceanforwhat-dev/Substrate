@@ -56,6 +56,7 @@ let saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 const AUTOSAVE_COMMAND_TYPES = new Set<CommandTypeName>([
   CommandType.CREATE_NODE,
+  CommandType.UPDATE_NODE,
   CommandType.DELETE_NODE,
   CommandType.ADD_EDGE,
   CommandType.REMOVE_EDGE,
@@ -93,6 +94,14 @@ async function recordCommandEvent(topicId: string, executed: Command): Promise<C
     case CommandType.CREATE_NODE: {
       const node = executed.payload?.node as BusinessNode;
       eventId = await pushEvent(topicId, 'NODE_CREATED', { node });
+      break;
+    }
+    case CommandType.UPDATE_NODE: {
+      const { id, changes } = executed.payload as {
+        id: string;
+        changes: Partial<BusinessNode>;
+      };
+      eventId = await pushEvent(topicId, 'NODE_UPDATED', { id, changes });
       break;
     }
     case CommandType.MOVE_NODE: {
@@ -243,8 +252,10 @@ export async function loadTopic(topicId: string): Promise<void> {
 
   const events = await localSync.pull(topicId, afterTimestamp);
   const replayableEvents = events.filter((e) => e.event_type !== 'TOPIC_SAVED');
-  const restored = replayEvents(snapshot, replayableEvents);
-  const useReplayStacks = replayableEvents.length > 0;
+  const restored = replayEvents(snapshot, replayableEvents, {
+    undoStack: snapshotRow?.undo_stack ?? [],
+    redoStack: snapshotRow?.redo_stack ?? [],
+  });
 
   useCanvasStore.setState({
     topicId,
@@ -252,8 +263,8 @@ export async function loadTopic(topicId: string): Promise<void> {
     nodes: restored.nodes,
     edges: restored.edges,
     experiences: restored.experiences,
-    undoStack: useReplayStacks ? restored.undoStack : (snapshotRow?.undo_stack ?? []),
-    redoStack: useReplayStacks ? restored.redoStack : (snapshotRow?.redo_stack ?? []),
+    undoStack: restored.undoStack,
+    redoStack: restored.redoStack,
   });
 
   postLoadFitView?.();
@@ -335,17 +346,6 @@ function findEdge(edges: BusinessEdge[], id: string): BusinessEdge {
   return edge;
 }
 
-function hasDuplicateEdge(
-  edges: BusinessEdge[],
-  source: string,
-  target: string,
-  edgeType: BusinessEdge['edge_type'],
-): boolean {
-  return edges.some(
-    (e) => e.source === source && e.target === target && e.edge_type === edgeType,
-  );
-}
-
 function removeEdgeFromExperienceTargets(
   experiences: Experience[],
   edgeId: string,
@@ -403,6 +403,25 @@ function applyStateChange(
     return { type: CommandType.CREATE_NODE, payload: { node } };
   }
 
+  if (command.type === CommandType.UPDATE_NODE) {
+    const id = command.payload?.id as string;
+    const changes = command.payload?.changes as Partial<BusinessNode>;
+    const existing = findNode(state.nodes, id);
+    const previous: Partial<BusinessNode> = {};
+    if (changes.label !== undefined) {
+      previous.label = existing.label;
+    }
+    if (changes.content !== undefined) {
+      previous.content = existing.content;
+    }
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === id ? BusinessNodeSchema.parse({ ...n, ...changes }) : n,
+      ),
+    }));
+    return { type: CommandType.UPDATE_NODE, payload: { id, changes, previous } };
+  }
+
   if (command.type === CommandType.DELETE_NODE) {
     const id = command.payload?.id as string;
     const node = findNode(state.nodes, id);
@@ -449,12 +468,6 @@ function applyStateChange(
 
     findNode(state.nodes, source);
     findNode(state.nodes, target);
-
-    if (hasDuplicateEdge(state.edges, source, target, edgeType)) {
-      throw new Error(
-        `CanvasStore: duplicate edge (${source} -> ${target}, type ${edgeType})`,
-      );
-    }
 
     const id =
       typeof input.id === 'string' && input.id.length > 0
@@ -620,10 +633,20 @@ export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
     const executed = applyStateChange(set, get, command);
     if (!executed) return;
 
+    pushUndo(set, executed);
+    const undoIndex = get().undoStack.length - 1;
+
     void (async () => {
       try {
         const withEventId = await recordCommandEvent(topicId, executed);
-        pushUndo(set, withEventId);
+        set((s) => {
+          if (undoIndex < 0 || undoIndex >= s.undoStack.length) {
+            return {};
+          }
+          const undoStack = s.undoStack.slice();
+          undoStack[undoIndex] = withEventId;
+          return { undoStack };
+        });
 
         if (AUTOSAVE_COMMAND_TYPES.has(withEventId.type as CommandTypeName)) {
           scheduleAutoSave(get);
@@ -640,9 +663,6 @@ export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
 
     const command = undoStack[undoStack.length - 1];
     const eventLocalId = command.meta?.eventLocalId;
-    if (eventLocalId == null) {
-      throw new Error('CanvasStore.undo: command missing eventLocalId');
-    }
 
     const inverse = computeInverse(command);
     applyStateChange(set, get, inverse);
@@ -652,7 +672,11 @@ export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
       redoStack: [...redoStack, command],
     });
 
-    void pushEvent(topicId, 'UNDO', { undone_event_id: String(eventLocalId) }).catch(console.error);
+    if (eventLocalId != null) {
+      void pushEvent(topicId, 'UNDO', { undone_event_id: String(eventLocalId) }).catch(
+        console.error,
+      );
+    }
   },
 
   redo: () => {
@@ -661,9 +685,6 @@ export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
 
     const command = redoStack[redoStack.length - 1];
     const eventLocalId = command.meta?.eventLocalId;
-    if (eventLocalId == null) {
-      throw new Error('CanvasStore.redo: command missing eventLocalId');
-    }
 
     applyStateChange(set, get, command);
 
@@ -672,6 +693,10 @@ export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
       undoStack: [...undoStack, command].slice(-MAX_UNDO_DEPTH),
     });
 
-    void pushEvent(topicId, 'REDO', { redone_event_id: String(eventLocalId) }).catch(console.error);
+    if (eventLocalId != null) {
+      void pushEvent(topicId, 'REDO', { redone_event_id: String(eventLocalId) }).catch(
+        console.error,
+      );
+    }
   },
 }));

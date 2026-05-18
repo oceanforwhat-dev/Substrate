@@ -89,7 +89,8 @@ function ImportLanguagePackButtonComponent({
       <button
         type="button"
         onClick={() => void openPicker()}
-        className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 shadow-sm hover:bg-stone-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700"
+        className="inline-flex min-w-[7.5rem] shrink-0 items-center justify-center rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-center text-xs font-medium text-stone-700 shadow-sm hover:bg-stone-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700"
+        title={t('header.importLanguage')}
       >
         {t('header.importLanguage')}
       </button>

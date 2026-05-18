@@ -117,20 +117,25 @@ export const CanvasSidebar = memo(function CanvasSidebar({
     [navigate],
   );
 
+  const railToggle = (
+    <button
+      type="button"
+      onClick={onToggle}
+      className="fixed top-1/2 z-40 -translate-y-1/2 rounded-l-lg border border-r-0 border-stone-200 bg-white px-2 py-3 text-xs font-medium text-stone-600 shadow-sm transition-[right] duration-200 hover:bg-stone-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-300"
+      style={{ right: open ? '18rem' : 0 }}
+      aria-label={open ? t('canvas.sidebar.close') : t('canvas.sidebar.open')}
+    >
+      {open ? '›' : '‹'}
+    </button>
+  );
+
   if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={onToggle}
-        className="fixed right-0 top-1/2 z-40 -translate-y-1/2 rounded-l-lg border border-r-0 border-stone-200 bg-white px-2 py-3 text-xs font-medium text-stone-600 shadow-sm hover:bg-stone-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-300"
-        aria-label={t('canvas.sidebar.open')}
-      >
-        ‹
-      </button>
-    );
+    return railToggle;
   }
 
   return (
+    <>
+      {railToggle}
     <aside className="pointer-events-auto flex w-72 shrink-0 flex-col border-l border-stone-200 bg-white shadow-lg dark:border-stone-700 dark:bg-stone-900">
       <div className="flex items-center justify-between border-b border-stone-200 px-3 py-2 dark:border-stone-700">
         <div className="flex gap-1">
@@ -187,6 +192,7 @@ export const CanvasSidebar = memo(function CanvasSidebar({
         )}
       </div>
     </aside>
+    </>
   );
 });
 

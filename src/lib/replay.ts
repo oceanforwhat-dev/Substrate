@@ -51,17 +51,6 @@ function findExperience(experiences: Experience[], id: string): Experience {
   return experience;
 }
 
-function hasDuplicateEdge(
-  edges: BusinessEdge[],
-  source: string,
-  target: string,
-  edgeType: BusinessEdge['edge_type'],
-): boolean {
-  return edges.some(
-    (e) => e.source === source && e.target === target && e.edge_type === edgeType,
-  );
-}
-
 function removeEdgeFromExperienceTargets(
   experiences: Experience[],
   edgeId: string,
@@ -107,6 +96,13 @@ export function computeInverse(command: Command): Command {
     case CommandType.DELETE_NODE: {
       const node = command.payload?.node as BusinessNode;
       return { type: CommandType.CREATE_NODE, payload: { node } };
+    }
+    case CommandType.UPDATE_NODE: {
+      const { id, previous } = command.payload as {
+        id: string;
+        previous: Partial<BusinessNode>;
+      };
+      return { type: CommandType.UPDATE_NODE, payload: { id, changes: previous } };
     }
     case CommandType.MOVE_NODE: {
       const id = command.payload?.id as string;
@@ -185,6 +181,29 @@ function applyCommandPure(canvas: CanvasData, command: Command): {
     };
   }
 
+  if (command.type === CommandType.UPDATE_NODE) {
+    const id = command.payload?.id as string;
+    const changes = command.payload?.changes as Partial<BusinessNode>;
+    const existing = findNode(nodes, id);
+    const previous: Partial<BusinessNode> = {};
+    if (changes.label !== undefined) {
+      previous.label = existing.label;
+    }
+    if (changes.content !== undefined) {
+      previous.content = existing.content;
+    }
+    return {
+      canvas: {
+        nodes: nodes.map((n) =>
+          n.id === id ? BusinessNodeSchema.parse({ ...n, ...changes }) : n,
+        ),
+        edges,
+        experiences,
+      },
+      executed: { type: CommandType.UPDATE_NODE, payload: { id, changes, previous } },
+    };
+  }
+
   if (command.type === CommandType.MOVE_NODE) {
     const id = command.payload?.id as string;
     const position = command.payload?.position as { x: number; y: number };
@@ -223,9 +242,6 @@ function applyCommandPure(canvas: CanvasData, command: Command): {
     const edgeType = (input.edge_type as BusinessEdge['edge_type']) ?? 'flat';
     findNode(nodes, source);
     findNode(nodes, target);
-    if (hasDuplicateEdge(edges, source, target, edgeType)) {
-      throw new Error(`replay: duplicate edge (${source} -> ${target})`);
-    }
     const id =
       typeof input.id === 'string' && input.id.length > 0 ? input.id : crypto.randomUUID();
     const edge = BusinessEdgeSchema.parse({ ...input, id, source, target, edge_type: edgeType });
@@ -322,6 +338,11 @@ function eventToCommand(event: SystemEvent): Command | null {
       return {
         type: CommandType.MOVE_NODE,
         payload: { id: event.payload.id, position: event.payload.position },
+      };
+    case 'NODE_UPDATED':
+      return {
+        type: CommandType.UPDATE_NODE,
+        payload: { id: event.payload.id, changes: event.payload.changes },
       };
     case 'NODE_DELETED':
       return { type: CommandType.DELETE_NODE, payload: { id: event.payload.id } };
@@ -429,13 +450,20 @@ function replayOne(
   };
 }
 
-export function replayEvents(snapshot: TopicCanvas, events: SystemEvent[]): ReplayResult {
+export function replayEvents(
+  snapshot: TopicCanvas,
+  events: SystemEvent[],
+  initialStacks: ReplayStacks = { undoStack: [], redoStack: [] },
+): ReplayResult {
   let canvas: CanvasData = {
     nodes: snapshot.nodes,
     edges: snapshot.edges,
     experiences: snapshot.experiences,
   };
-  let stacks: ReplayStacks = { undoStack: [], redoStack: [] };
+  let stacks: ReplayStacks = {
+    undoStack: [...initialStacks.undoStack],
+    redoStack: [...initialStacks.redoStack],
+  };
 
   for (const event of events) {
     const next = replayOne(canvas, stacks, event);

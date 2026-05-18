@@ -24,6 +24,7 @@ import { ImportLanguagePackButton } from './ImportLanguagePackButton';
 import { LocaleSwitcher } from './LocaleSwitcher';
 import { ThemeToggle } from './ThemeToggle';
 import { TopicCard } from './TopicCard';
+import { TopicNameDialog } from './TopicNameDialog';
 
 const BTN =
   'rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50 disabled:opacity-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700';
@@ -47,6 +48,7 @@ export const Dashboard = memo(function Dashboard() {
   const [indexing, setIndexing] = useState(false);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<'and' | 'or'>('or');
+  const [newTopicDialogOpen, setNewTopicDialogOpen] = useState(false);
 
   const refreshTopics = useCallback(async () => {
     setLoading(true);
@@ -77,15 +79,20 @@ export const Dashboard = memo(function Dashboard() {
     [navigate],
   );
 
-  const handleNewTopic = useCallback(async () => {
-    try {
-      const topicId = await createBlankTopic();
-      openTopic(topicId);
-    } catch (err) {
-      console.error(err);
-      setError(t('dashboard.errorLoad'));
-    }
-  }, [openTopic, t]);
+  const handleNewTopicConfirm = useCallback(
+    async (title: string) => {
+      setNewTopicDialogOpen(false);
+      try {
+        const trimmed = title.trim() || t('common.untitled');
+        const topicId = await createBlankTopic(trimmed);
+        openTopic(topicId);
+      } catch (err) {
+        console.error(err);
+        setError(t('dashboard.errorLoad'));
+      }
+    },
+    [openTopic, t],
+  );
 
   const runImport = useCallback(
     async (file: File) => {
@@ -228,10 +235,14 @@ export const Dashboard = memo(function Dashboard() {
           <h1 className="text-lg font-semibold text-stone-900 dark:text-stone-100">
             {t('app.title')}
           </h1>
-          <p className="text-sm text-stone-500 dark:text-stone-400">{t('app.subtitle')}</p>
+          <p className="text-sm text-stone-500 dark:text-stone-400">
+            {loading
+              ? t('dashboard.loading')
+              : t('dashboard.topicCount').replace('{count}', String(topics.length))}
+          </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button type="button" onClick={() => void handleNewTopic()} className={PRIMARY_BTN}>
+          <button type="button" onClick={() => setNewTopicDialogOpen(true)} className={PRIMARY_BTN}>
             {t('dashboard.newTopic')}
           </button>
           <button
@@ -371,6 +382,13 @@ export const Dashboard = memo(function Dashboard() {
           initialTags={tagsEditorTopic.tags}
           onSave={(tags) => void handleSaveTags(tags)}
           onCancel={() => setTagsEditorTopic(null)}
+        />
+      )}
+
+      {newTopicDialogOpen && (
+        <TopicNameDialog
+          onConfirm={(title) => void handleNewTopicConfirm(title)}
+          onCancel={() => setNewTopicDialogOpen(false)}
         />
       )}
 

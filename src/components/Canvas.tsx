@@ -8,6 +8,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react';
 import {
+  applyEdgeChanges,
   applyNodeChanges,
   Background,
   getBezierPath,
@@ -20,10 +21,13 @@ import {
   type Connection,
   type ConnectionLineComponentProps,
   type Edge,
+  type EdgeChange,
   type EdgeTypes,
   type Node,
   type NodeChange,
   type NodeTypes,
+  type OnConnectEnd,
+  type OnConnectStart,
   type OnNodeDrag,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -41,8 +45,9 @@ import {
   type NodeClipboardPayload,
 } from '../lib/nodeClipboard';
 import { CanvasSidebar } from './CanvasSidebar';
-import type { BusinessEdge, BusinessNode, Modifier } from '../schema';
+import type { BusinessEdge, BusinessNode } from '../schema';
 import { SHORTCUTS } from '../shortcuts';
+import { renameTopic } from '../lib/topics';
 import {
   CommandType,
   getTopicCanvasForExport,
@@ -51,6 +56,7 @@ import {
   registerPostLoadFitView,
   type ModifierTargetType,
   useCanvasSelector,
+  useCanvasStore,
 } from '../store';
 import { useI18n } from '../i18n/I18nContext';
 import { useTheme } from '../theme/ThemeContext';
@@ -61,9 +67,17 @@ import { ComponentNode } from './nodes/ComponentNode';
 import { ExperienceNode } from './nodes/ExperienceNode';
 import { ThoughtEdge } from './edges/ThoughtEdge';
 import { GoalNode } from './nodes/GoalNode';
+import { InlineNamePrompt } from './InlineNamePrompt';
+import { ModifierPrompt, type ModifierPromptKind } from './ModifierPrompt';
 
 const HEADER_BTN =
-  'rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 shadow-sm hover:bg-stone-50 disabled:opacity-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700';
+  'inline-flex shrink-0 items-center justify-center rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-center text-xs font-medium text-stone-700 shadow-sm hover:bg-stone-50 disabled:opacity-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700';
+
+/** Min widths sized for longest en-US / zh-CN toolbar labels. */
+const TOOLBAR_BTN_BACK = `${HEADER_BTN} min-w-[9.5rem]`;
+const TOOLBAR_BTN_EXPORT = `${HEADER_BTN} min-w-[4.75rem]`;
+const TOOLBAR_BTN_IMPORT = `${HEADER_BTN} min-w-[5.75rem]`;
+const TOOLBAR_BTN_EDGE = `${HEADER_BTN} min-w-[11.5rem]`;
 
 const DEFAULT_NODE_WIDTH = 150;
 const DEFAULT_NODE_HEIGHT = 56;
@@ -90,6 +104,20 @@ interface ContextMenuState {
 }
 
 const CONNECTION_ARROW_ID = 'substrate-connection-arrow';
+
+const IDLE_CONNECTION = {
+  inProgress: false as const,
+  isValid: null,
+  from: null,
+  fromHandle: null,
+  fromPosition: null,
+  fromNode: null,
+  to: null,
+  toHandle: null,
+  toPosition: null,
+  toNode: null,
+  pointer: null,
+};
 
 function ThoughtConnectionLine({
   fromX,
@@ -142,6 +170,37 @@ interface ExperiencePromptState {
   bbox: { x: number; y: number; width: number; height: number };
 }
 
+type NamingPrompt =
+  | {
+      kind: 'create';
+      nodeType: 'component' | 'goal';
+      flowX: number;
+      flowY: number;
+      screenX: number;
+      screenY: number;
+    }
+  | {
+      kind: 'rename';
+      nodeId: string;
+      initialLabel: string;
+      screenX: number;
+      screenY: number;
+    }
+  | {
+      kind: 'renameTopic';
+      initialTitle: string;
+      screenX: number;
+      screenY: number;
+    };
+
+interface ModifierPromptState {
+  screenX: number;
+  screenY: number;
+  targetId: string;
+  targetType: ModifierTargetType;
+  kind: ModifierPromptKind;
+}
+
 function computeSelectionBounds(nodes: Node[]) {
   let minX = Infinity;
   let minY = Infinity;
@@ -176,6 +235,8 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
   const businessEdges = useCanvasSelector((s) => s.edges);
   const businessExperiences = useCanvasSelector((s) => s.experiences);
   const dispatch = useCanvasSelector((s) => s.dispatch);
+  const undo = useCanvasSelector((s) => s.undo);
+  const redo = useCanvasSelector((s) => s.redo);
   const { screenToFlowPosition, flowToScreenPosition, fitView, getNodes } = useReactFlow();
   const storeApi = useStoreApi();
 
@@ -192,6 +253,8 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
   const [toast, setToast] = useState<string | null>(null);
   const [lassoMode, setLassoMode] = useState(false);
   const [edgeType, setEdgeType] = useState<BusinessEdge['edge_type']>('flat');
+  const [namingPrompt, setNamingPrompt] = useState<NamingPrompt | null>(null);
+  const [modifierPrompt, setModifierPrompt] = useState<ModifierPromptState | null>(null);
   const [experiencePrompt, setExperiencePrompt] = useState<ExperiencePromptState | null>(null);
   const [experienceTitle, setExperienceTitle] = useState('');
   const [experienceContent, setExperienceContent] = useState('');
@@ -200,6 +263,17 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const mouseFlowRef = useRef({ x: 0, y: 0 });
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectSessionActive = useRef(false);
+
+  const resetConnectionDraft = useCallback(() => {
+    connectSessionActive.current = false;
+    storeApi.setState({ connection: IDLE_CONNECTION });
+  }, [storeApi]);
+
+  const toggleEdgeType = useCallback(() => {
+    resetConnectionDraft();
+    setEdgeType((current) => (current === 'flat' ? 'directed_thought' : 'flat'));
+  }, [resetConnectionDraft]);
 
   const selectedCanvasNodes = useStore((state) =>
     state.nodes.filter(
@@ -238,10 +312,37 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
 
   const clearNodeSelection = useCallback(() => {
     setRfNodes((nodes) => nodes.map((node) => ({ ...node, selected: false })));
+    setRfEdges((edges) => edges.map((edge) => ({ ...edge, selected: false })));
     storeApi.getState().unselectNodesAndEdges();
   }, [storeApi]);
 
-  const rfEdges = useMemo(() => toReactFlowEdges(businessEdges), [businessEdges]);
+  const baseRfEdges = useMemo(() => toReactFlowEdges(businessEdges), [businessEdges]);
+  const [rfEdges, setRfEdges] = useState<Edge[]>(baseRfEdges);
+
+  useEffect(() => {
+    setRfEdges((prev) => {
+      const selectedIds = new Set(
+        prev.filter((edge) => edge.selected).map((edge) => edge.id),
+      );
+      return baseRfEdges.map((edge) => ({
+        ...edge,
+        selectable: true,
+        selected: selectedIds.has(edge.id),
+      }));
+    });
+  }, [baseRfEdges]);
+
+  const onEdgesChange = useCallback((changes: EdgeChange[]) => {
+    setRfEdges((edges) => applyEdgeChanges(changes, edges));
+  }, []);
+
+  const selectSingleEdge = useCallback((edgeId: string) => {
+    setRfNodes((nodes) => nodes.map((node) => ({ ...node, selected: false })));
+    setRfEdges((edges) =>
+      edges.map((edge) => ({ ...edge, selected: edge.id === edgeId })),
+    );
+    storeApi.getState().unselectNodesAndEdges();
+  }, [storeApi]);
 
   const showToast = useCallback((message: string, durationMs = 2800) => {
     if (toastTimerRef.current) {
@@ -299,6 +400,96 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
     [dispatch, t],
   );
 
+  const resolveNodeLabel = useCallback(
+    (raw: string, nodeType: 'component' | 'goal') => {
+      const trimmed = raw.trim();
+      if (trimmed.length > 0) return trimmed;
+      return nodeType === 'component' ? t('node.componentDefault') : t('node.goalDefault');
+    },
+    [t],
+  );
+
+  const openCreateNaming = useCallback(
+    (
+      nodeType: 'component' | 'goal',
+      flowPosition: { x: number; y: number },
+      screenPosition?: { x: number; y: number },
+    ) => {
+      setContextMenu(null);
+      const screen = screenPosition ?? flowToScreenPosition(flowPosition);
+      setNamingPrompt({
+        kind: 'create',
+        nodeType,
+        flowX: flowPosition.x,
+        flowY: flowPosition.y,
+        screenX: screen.x,
+        screenY: screen.y,
+      });
+    },
+    [flowToScreenPosition],
+  );
+
+  const openTopicTitleRename = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
+      const rect = event.currentTarget.getBoundingClientRect();
+      setNamingPrompt({
+        kind: 'renameTopic',
+        initialTitle: topicTitle || t('common.untitled'),
+        screenX: rect.left + rect.width / 2,
+        screenY: rect.bottom + 6,
+      });
+    },
+    [t, topicTitle],
+  );
+
+  const openRenameNaming = useCallback(
+    (nodeId: string) => {
+      const node = businessNodes.find((n) => n.id === nodeId);
+      if (!node || (node.type !== 'component' && node.type !== 'goal')) return;
+      const screen = flowToScreenPosition({
+        x: node.metadata.visual.x,
+        y: node.metadata.visual.y,
+      });
+      setContextMenu(null);
+      setNamingPrompt({
+        kind: 'rename',
+        nodeId,
+        initialLabel: node.label,
+        screenX: screen.x,
+        screenY: screen.y,
+      });
+    },
+    [businessNodes, flowToScreenPosition],
+  );
+
+  const handleNamingConfirm = useCallback(
+    (value: string) => {
+      if (!namingPrompt) return;
+      if (namingPrompt.kind === 'create') {
+        createNodeAt(
+          namingPrompt.nodeType,
+          { x: namingPrompt.flowX, y: namingPrompt.flowY },
+          { label: resolveNodeLabel(value, namingPrompt.nodeType) },
+        );
+      } else if (namingPrompt.kind === 'rename') {
+        const label = value.trim();
+        if (label.length > 0) {
+          dispatch({
+            type: CommandType.UPDATE_NODE,
+            payload: { id: namingPrompt.nodeId, changes: { label } },
+          });
+        }
+      } else if (namingPrompt.kind === 'renameTopic' && topicId) {
+        const title = value.trim() || t('common.untitled');
+        void renameTopic(topicId, title).then(() => {
+          useCanvasStore.setState({ topicTitle: title });
+        });
+      }
+      setNamingPrompt(null);
+    },
+    [createNodeAt, dispatch, namingPrompt, resolveNodeLabel, t, topicId],
+  );
+
   const pasteReferenceNode = useCallback(
     (clip: NodeClipboardPayload, position: { x: number; y: number }) => {
       const isCrossTopic = clip.topicId !== topicId;
@@ -347,13 +538,31 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
 
   const onEdgeContextMenu = useCallback(
     (event: ReactMouseEvent, edge: Edge) => {
+      selectSingleEdge(edge.id);
       openContextMenu(event, 'edge', edge.id);
     },
-    [openContextMenu],
+    [openContextMenu, selectSingleEdge],
+  );
+
+  const onConnectStart: OnConnectStart = useCallback(() => {
+    connectSessionActive.current = true;
+  }, []);
+
+  const onConnectEnd: OnConnectEnd = useCallback(
+    (_event, connectionState) => {
+      if (connectionState.isValid !== true) {
+        resetConnectionDraft();
+      } else {
+        connectSessionActive.current = false;
+      }
+    },
+    [resetConnectionDraft],
   );
 
   const onConnect = useCallback(
     (connection: Connection) => {
+      if (!connectSessionActive.current) return;
+      connectSessionActive.current = false;
       if (!connection.source || !connection.target) return;
       dispatch({
         type: CommandType.ADD_EDGE,
@@ -393,25 +602,46 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
     setContextMenu(null);
   }, []);
 
-  const attachModifier = useCallback(
-    (targetId: string, targetType: ModifierTargetType, modifierType: Modifier['type']) => {
-      let content = '';
-      let url = '';
-
-      if (modifierType === 'text') {
-        const input = window.prompt(t('prompt.textModifier'));
-        if (input === null) return;
-        content = input;
-      } else if (modifierType === 'image') {
-        const input = window.prompt(t('prompt.imageUrl'));
-        if (input === null) return;
-        url = input;
-      } else if (modifierType === 'scope') {
-        content = t('modifier.scopeLabel');
-      } else {
-        content = t('modifier.syntaxLabel');
+  const onNodeClick = useCallback(
+    (_event: ReactMouseEvent, node: Node) => {
+      if (lassoMode || node.type === 'experienceNode') return;
+      closeContextMenu();
+      if (node.selected) {
+        clearNodeSelection();
+        return;
       }
+      setRfEdges((edges) => edges.map((edge) => ({ ...edge, selected: false })));
+    },
+    [clearNodeSelection, closeContextMenu, lassoMode],
+  );
 
+  const onEdgeClick = useCallback(
+    (_event: ReactMouseEvent, edge: Edge) => {
+      if (lassoMode) return;
+      closeContextMenu();
+      selectSingleEdge(edge.id);
+    },
+    [closeContextMenu, lassoMode, selectSingleEdge],
+  );
+
+  const openModifierPrompt = useCallback(
+    (
+      targetId: string,
+      targetType: ModifierTargetType,
+      kind: ModifierPromptKind,
+      screenX: number,
+      screenY: number,
+    ) => {
+      closeContextMenu();
+      setModifierPrompt({ targetId, targetType, kind, screenX, screenY });
+    },
+    [closeContextMenu],
+  );
+
+  const confirmModifierPrompt = useCallback(
+    (value: string) => {
+      if (!modifierPrompt) return;
+      const { targetId, targetType, kind } = modifierPrompt;
       dispatch({
         type: CommandType.ATTACH_MODIFIER,
         payload: {
@@ -419,9 +649,30 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
           targetType,
           modifier: {
             id: crypto.randomUUID(),
-            type: modifierType,
-            content,
-            url,
+            type: kind,
+            content: kind === 'text' ? value : '',
+            url: kind === 'image' ? value : '',
+            appliesToTopic: false,
+          },
+        },
+      });
+      setModifierPrompt(null);
+    },
+    [dispatch, modifierPrompt],
+  );
+
+  const attachScopeModifier = useCallback(
+    (targetId: string, targetType: ModifierTargetType) => {
+      dispatch({
+        type: CommandType.ATTACH_MODIFIER,
+        payload: {
+          targetId,
+          targetType,
+          modifier: {
+            id: crypto.randomUUID(),
+            type: 'scope',
+            content: t('modifier.scopeLabel'),
+            url: '',
             appliesToTopic: false,
           },
         },
@@ -585,6 +836,22 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
         return;
       }
 
+      if (namingPrompt) {
+        if (event.key === SHORTCUTS.ESCAPE) {
+          event.preventDefault();
+          setNamingPrompt(null);
+        }
+        return;
+      }
+
+      if (modifierPrompt) {
+        if (event.key === SHORTCUTS.ESCAPE) {
+          event.preventDefault();
+          setModifierPrompt(null);
+        }
+        return;
+      }
+
       const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
       const chord = event.ctrlKey || event.metaKey;
 
@@ -614,6 +881,18 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
       if (chord && key === 'v') {
         event.preventDefault();
         handlePaste();
+        return;
+      }
+
+      if (chord && (key === 'y' || (event.shiftKey && key === 'z'))) {
+        event.preventDefault();
+        redo();
+        return;
+      }
+
+      if (chord && !event.shiftKey && key === 'z') {
+        event.preventDefault();
+        undo();
         return;
       }
 
@@ -652,61 +931,61 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
 
       if (key === SHORTCUTS.THOUGHT_MODE) {
         event.preventDefault();
-        setEdgeType((current) => (current === 'flat' ? 'directed_thought' : 'flat'));
+        toggleEdgeType();
         return;
       }
 
       if (key === SHORTCUTS.CREATE_COMPONENT) {
         event.preventDefault();
-        createNodeAt('component', mouseFlowRef.current);
+        openCreateNaming('component', mouseFlowRef.current);
         return;
       }
 
       if (key === SHORTCUTS.CREATE_GOAL) {
         event.preventDefault();
-        createNodeAt('goal', mouseFlowRef.current);
+        openCreateNaming('goal', mouseFlowRef.current);
       }
     };
 
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [
     clearNodeSelection,
     closeContextMenu,
     closeExperiencePrompt,
-    createNodeAt,
     exitLassoMode,
     experiencePrompt,
     getNodes,
     handlePaste,
     lassoMode,
+    modifierPrompt,
+    namingPrompt,
+    openCreateNaming,
+    redo,
     showToast,
+    toggleEdgeType,
     topicId,
     t,
+    undo,
   ]);
 
   return (
 <>
       <header className="fixed left-4 top-4 z-50 flex max-w-[calc(100%-2rem)] flex-wrap items-center gap-2">
-        <nav
-          className="flex min-w-0 items-center gap-1 rounded-lg border border-stone-200 bg-white px-2 py-1 shadow-sm dark:border-stone-600 dark:bg-stone-800"
-          aria-label={t('canvas.breadcrumb')}
+        <button
+          type="button"
+          onClick={openTopicTitleRename}
+          className="max-w-[12rem] truncate rounded-lg border border-stone-200 bg-white px-2.5 py-1.5 text-xs font-medium text-stone-800 shadow-sm hover:bg-stone-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-100 dark:hover:bg-stone-700"
+          title={t('dashboard.menu.rename')}
         >
-          <button
-            type="button"
-            onClick={onBack}
-            className="shrink-0 text-xs font-medium text-stone-600 hover:text-stone-900 dark:text-stone-300 dark:hover:text-stone-100"
-          >
-            {t('canvas.dashboard')}
-          </button>
-          <span className="text-xs text-stone-400 dark:text-stone-500" aria-hidden>
-            /
-          </span>
-          <span className="max-w-[10rem] truncate text-xs font-medium text-stone-800 dark:text-stone-100">
-            {topicTitle || t('common.untitled')}
-          </span>
-        </nav>
-        <button type="button" onClick={onBack} className={HEADER_BTN}>
+          {topicTitle || t('common.untitled')}
+        </button>
+        <button
+          type="button"
+          onClick={onBack}
+          className={TOOLBAR_BTN_BACK}
+          title={t('canvas.backToDashboard')}
+        >
           {t('canvas.backToDashboard')}
         </button>
         <LocaleSwitcher />
@@ -715,23 +994,33 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
           onSuccess={() => showToast(t('toast.languageImported'))}
           onError={() => showToast(t('toast.languageInvalid'))}
         />
-        <button type="button" onClick={handleExport} className={HEADER_BTN}>
+        <button
+          type="button"
+          onClick={handleExport}
+          className={TOOLBAR_BTN_EXPORT}
+          title={t('header.export')}
+        >
           {t('header.export')}
         </button>
         <button
           type="button"
           onClick={() => void handleImportClick()}
           disabled={importing}
-          className={HEADER_BTN}
+          className={TOOLBAR_BTN_IMPORT}
+          title={importing ? t('common.importing') : t('header.import')}
         >
           {importing ? t('common.importing') : t('header.import')}
         </button>
         <button
           type="button"
           onClick={() => setSidebarOpen((open) => !open)}
-          className={HEADER_BTN}
+          className={`${HEADER_BTN} flex h-[30px] w-[30px] shrink-0 items-center justify-center p-0`}
+          aria-label={sidebarOpen ? t('canvas.sidebar.hide') : t('canvas.sidebar.show')}
+          title={sidebarOpen ? t('canvas.sidebar.hide') : t('canvas.sidebar.show')}
         >
-          {sidebarOpen ? t('canvas.sidebar.hide') : t('canvas.sidebar.show')}
+          <span className="text-sm leading-none" aria-hidden>
+            {sidebarOpen ? '▷' : '◁'}
+          </span>
         </button>
         <span className="text-xs text-stone-500 dark:text-stone-400">{selectionStatusText}</span>
       </header>
@@ -760,18 +1049,26 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
         selectionOnDrag={lassoMode}
         panOnDrag={!lassoMode}
         onConnect={onConnect}
+        onConnectStart={onConnectStart}
+        onConnectEnd={onConnectEnd}
         connectionLineStyle={connectionLineStyle}
         connectionLineComponent={
           edgeType === 'directed_thought' ? ThoughtConnectionLine : undefined
         }
         onPaneContextMenu={onPaneContextMenu}
         onNodeContextMenu={onNodeContextMenu}
+        onNodeClick={onNodeClick}
         onEdgeContextMenu={onEdgeContextMenu}
+        onEdgeClick={onEdgeClick}
         onMouseMove={onMouseMove}
         onNodeDragStop={onNodeDragStop}
         onSelectionEnd={onSelectionEnd}
         onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        nodeClickDistance={10}
+        paneClickDistance={5}
         selectNodesOnDrag={false}
+        proOptions={{ hideAttribution: true }}
         onPaneClick={() => {
           closeContextMenu();
           if (experiencePrompt) {
@@ -815,8 +1112,11 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
                 type="button"
                 className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
                 onClick={() => {
-                  createNodeAt('component', { x: contextMenu.flowX, y: contextMenu.flowY });
-                  closeContextMenu();
+                  openCreateNaming(
+                    'component',
+                    { x: contextMenu.flowX, y: contextMenu.flowY },
+                    { x: contextMenu.clientX, y: contextMenu.clientY },
+                  );
                 }}
               >
                 {t('menu.newComponent')}
@@ -825,8 +1125,11 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
                 type="button"
                 className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
                 onClick={() => {
-                  createNodeAt('goal', { x: contextMenu.flowX, y: contextMenu.flowY });
-                  closeContextMenu();
+                  openCreateNaming(
+                    'goal',
+                    { x: contextMenu.flowX, y: contextMenu.flowY },
+                    { x: contextMenu.clientX, y: contextMenu.clientY },
+                  );
                 }}
               >
                 {t('menu.newGoal')}
@@ -845,28 +1148,44 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
               <button
                 type="button"
                 className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
-                onClick={() => attachModifier(contextMenu.targetId!, 'node', 'text')}
+                onClick={() => openRenameNaming(contextMenu.targetId!)}
+              >
+                {t('menu.rename')}
+              </button>
+              <button
+                type="button"
+                className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
+                onClick={() =>
+                  openModifierPrompt(
+                    contextMenu.targetId!,
+                    'node',
+                    'text',
+                    contextMenu.clientX,
+                    contextMenu.clientY,
+                  )
+                }
               >
                 {t('menu.addTextModifier')}
               </button>
               <button
                 type="button"
                 className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
-                onClick={() => attachModifier(contextMenu.targetId!, 'node', 'image')}
+                onClick={() =>
+                  openModifierPrompt(
+                    contextMenu.targetId!,
+                    'node',
+                    'image',
+                    contextMenu.clientX,
+                    contextMenu.clientY,
+                  )
+                }
               >
                 {t('menu.addImageModifier')}
               </button>
               <button
                 type="button"
                 className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
-                onClick={() => attachModifier(contextMenu.targetId!, 'node', 'syntax')}
-              >
-                {t('menu.addSyntaxModifier')}
-              </button>
-              <button
-                type="button"
-                className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
-                onClick={() => attachModifier(contextMenu.targetId!, 'node', 'scope')}
+                onClick={() => attachScopeModifier(contextMenu.targetId!, 'node')}
               >
                 {t('menu.addScopeModifier')}
               </button>
@@ -891,29 +1210,52 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
             <>
               <button
                 type="button"
+                className="block w-full px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50 dark:text-red-300 dark:hover:bg-red-950/40"
+                onClick={() => {
+                  dispatch({
+                    type: CommandType.REMOVE_EDGE,
+                    payload: { id: contextMenu.targetId },
+                  });
+                  clearNodeSelection();
+                  closeContextMenu();
+                }}
+              >
+                {t('menu.deleteEdge')}
+              </button>
+              <button
+                type="button"
                 className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
-                onClick={() => attachModifier(contextMenu.targetId!, 'edge', 'text')}
+                onClick={() =>
+                  openModifierPrompt(
+                    contextMenu.targetId!,
+                    'edge',
+                    'text',
+                    contextMenu.clientX,
+                    contextMenu.clientY,
+                  )
+                }
               >
                 {t('menu.addTextModifier')}
               </button>
               <button
                 type="button"
                 className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
-                onClick={() => attachModifier(contextMenu.targetId!, 'edge', 'image')}
+                onClick={() =>
+                  openModifierPrompt(
+                    contextMenu.targetId!,
+                    'edge',
+                    'image',
+                    contextMenu.clientX,
+                    contextMenu.clientY,
+                  )
+                }
               >
                 {t('menu.addImageModifier')}
               </button>
               <button
                 type="button"
                 className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
-                onClick={() => attachModifier(contextMenu.targetId!, 'edge', 'syntax')}
-              >
-                {t('menu.addSyntaxModifier')}
-              </button>
-              <button
-                type="button"
-                className="block w-full px-3 py-2 text-left text-sm text-stone-700 hover:bg-stone-100 dark:text-stone-200 dark:hover:bg-stone-700"
-                onClick={() => attachModifier(contextMenu.targetId!, 'edge', 'scope')}
+                onClick={() => attachScopeModifier(contextMenu.targetId!, 'edge')}
               >
                 {t('menu.addScopeModifier')}
               </button>
@@ -925,10 +1267,13 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
       {!lassoMode && (
         <button
           type="button"
-          onClick={() =>
-            setEdgeType((current) => (current === 'flat' ? 'directed_thought' : 'flat'))
-          }
-          className={`fixed right-4 top-4 z-50 ${HEADER_BTN}`}
+          onClick={toggleEdgeType}
+          className={`fixed top-4 z-50 transition-[right] duration-200 ${TOOLBAR_BTN_EDGE}`}
+          style={{ right: sidebarOpen ? 'calc(18rem + 1rem)' : '1rem' }}
+          title={t('canvas.edgeLabel').replace(
+            '{type}',
+            edgeType === 'flat' ? t('canvas.edgeFlat') : t('canvas.edgeThought'),
+          )}
         >
           {t('canvas.edgeLabel').replace(
             '{type}',
@@ -941,6 +1286,41 @@ function CanvasFlow({ onBack, onTopicImported }: CanvasFlowProps) {
         <div className="fixed left-20 top-4 z-50 rounded-lg border border-orange-200 bg-orange-50 px-3 py-1.5 text-xs font-medium text-orange-900 dark:border-orange-700 dark:bg-orange-950/60 dark:text-orange-200">
           {t('canvas.lassoMode')}
         </div>
+      )}
+
+      {modifierPrompt && (
+        <ModifierPrompt
+          screenX={modifierPrompt.screenX}
+          screenY={modifierPrompt.screenY}
+          kind={modifierPrompt.kind}
+          onConfirm={confirmModifierPrompt}
+          onCancel={() => setModifierPrompt(null)}
+        />
+      )}
+
+      {namingPrompt && (
+        <InlineNamePrompt
+          screenX={namingPrompt.screenX}
+          screenY={namingPrompt.screenY}
+          initialValue={
+            namingPrompt.kind === 'rename'
+              ? namingPrompt.initialLabel
+              : namingPrompt.kind === 'renameTopic'
+                ? namingPrompt.initialTitle
+                : ''
+          }
+          placeholder={
+            namingPrompt.kind === 'create'
+              ? namingPrompt.nodeType === 'component'
+                ? t('naming.componentPlaceholder')
+                : t('naming.goalPlaceholder')
+              : namingPrompt.kind === 'renameTopic'
+                ? t('naming.topicPlaceholder')
+                : t('naming.renamePlaceholder')
+          }
+          onConfirm={handleNamingConfirm}
+          onCancel={() => setNamingPrompt(null)}
+        />
       )}
 
       {experiencePrompt && (

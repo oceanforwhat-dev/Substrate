@@ -49,6 +49,8 @@ function getThoughtEdgePath(
   return [path, labelX, labelY];
 }
 
+const SELECTED_EDGE_STROKE = '#3b82f6';
+
 function ThoughtEdgeComponent({
   sourceX,
   sourceY,
@@ -59,6 +61,7 @@ function ThoughtEdgeComponent({
   data,
   markerEnd,
   style,
+  selected,
 }: EdgeProps<ThoughtFlowEdge>) {
   if (!data) {
     return null;
@@ -81,13 +84,17 @@ function ThoughtEdgeComponent({
     '';
 
   const showMarker = data.edge_type === 'directed_thought';
+  const edgeStyle = selected
+    ? { ...style, stroke: SELECTED_EDGE_STROKE, strokeWidth: 3 }
+    : style;
 
   return (
     <>
       <BaseEdge
         path={edgePath}
         markerEnd={showMarker ? markerEnd : undefined}
-        style={style}
+        style={edgeStyle}
+        interactionWidth={24}
       />
       <EdgeLabelRenderer>
         <div

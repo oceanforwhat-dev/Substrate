@@ -36,7 +36,7 @@ describe('Sprint 2 — topology & modifiers', () => {
     });
   });
 
-  it('ADD_EDGE rejects self-loops and duplicates; emits EDGE_ADDED', async () => {
+  it('ADD_EDGE rejects self-loops; allows parallel edges on same pair; emits EDGE_ADDED', async () => {
     seedNodes();
     const { dispatch } = useCanvasStore.getState();
 
@@ -58,22 +58,20 @@ describe('Sprint 2 — topology & modifiers', () => {
       }),
     ).toThrow(/self-loop/);
 
-    expect(() =>
-      dispatch({
-        type: CommandType.ADD_EDGE,
-        payload: { edge: { source: 'n1', target: 'n2', edge_type: 'flat' } },
-      }),
-    ).toThrow(/duplicate edge/);
+    dispatch({
+      type: CommandType.ADD_EDGE,
+      payload: { edge: { source: 'n1', target: 'n2', edge_type: 'flat' } },
+    });
 
     dispatch({
       type: CommandType.ADD_EDGE,
       payload: { edge: { source: 'n1', target: 'n2', edge_type: 'directed_thought' } },
     });
 
-    expect(useCanvasStore.getState().edges).toHaveLength(2);
+    expect(useCanvasStore.getState().edges).toHaveLength(3);
 
     const added = await db.events.where('event_type').equals('EDGE_ADDED').toArray();
-    expect(added).toHaveLength(2);
+    expect(added).toHaveLength(3);
     expect(typeof added[0]?.client_timestamp).toBe('number');
   });
 
