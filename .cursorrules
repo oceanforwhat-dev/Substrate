@@ -1,0 +1,53 @@
+# Substrate Project Rules (The Constitution)
+
+## Project File Map (Read before any task)
+- `DESIGN.md` — Complete technical blueprint.
+- `schema.ts` — Zod schemas for BusinessNode, BusinessEdge, Modifier, Experience.
+- `events.ts` — Event type literals (NODE_CREATED, EDGE_ADDED, MODIFIER_ATTACHED, etc.).
+- `store.ts` — Zustand CanvasStore (dispatch, undo/redo, command stack).
+- `adapters/reactFlowAdapter.ts` — Business data -> React Flow format.
+- `db.ts` — Dexie.js setup (topics, events, snapshots).
+- `supabase.ts` — Supabase client and sync.
+- `shortcuts.ts` — All keyboard shortcuts as constants.
+
+## Technical Stack & Constraints
+- Framework: React (Latest), TypeScript, Tailwind CSS.
+- Canvas: React Flow (v12+).
+- State: Zustand (no Immer, immutable spreads).
+- Validation: Zod (Migration on Read — all persistent data parsed on load).
+- DB: Supabase (PostgreSQL JSONB) + IndexedDB (Dexie.js).
+- Architecture: ECS-inspired, composition over inheritance.
+
+## Data Model Invariants
+- 4 entity types: Node, Edge, Modifier, Experience.
+- Node types: 'component' | 'goal'. (Experience is NOT a node type.)
+- Edge types: 'flat' | 'directed_thought'.
+- Modifier types: 'text', 'image', 'scope', 'syntax'. Always attached to a Node or Edge.
+- Experience: standalone, has `targets: {id, type}[]`, one-time mapping (no physics binding).
+
+## Engineering Taboos (Absolute No-Go)
+- NO Static Singletons.
+- NO Deep Inheritance.
+- NO Silent Failures (fail loudly with Zod or assertions).
+- NO Magic Strings — use Enums/Literals from `events.ts` and `schema.ts`.
+- NO Side Effects in Reducers — all state changes pure, logging/sync in dispatch coordinator.
+- NO Unmemoized Custom React Flow Nodes — always wrap with `React.memo`.
+
+## Data Flow Rules
+- Single Source of Truth: Zustand `CanvasStore` (business nodes, edges, experiences).
+- Append-only Event Stream: Every state change writes an event to IndexedDB `events` table.
+- View-Model Separation: Business data != React Flow data. Use `reactFlowAdapter.ts`.
+- Move Performance: `NODE_MOVED` event ONLY on `onNodeDragStop`. No events during drag.
+- Sync: Local-first, then push to Supabase (LWW per topic). Load snapshot first, then replay events.
+- Undo/Redo: Command stack (max 50) + mark UNDO/REDO events in stream. No physical deletion.
+
+## UI & Interaction Rules
+- Right-click: Flat hierarchy. [New Component] [New Goal] [Paste] on top.
+- Shortcuts: Loaded from `shortcuts.ts`. Defaults: C (Component), G (Goal), S (Thought mode), L (Lasso), Esc (default mode).
+- Lasso: Select nodes/edges, create Experience with `targets` snapshot. No dynamic binding after creation.
+- Nodes >200 in one canvas: show warning, suggest splitting topic.
+
+## Prompting Instructions for AI
+- Always reference `@DESIGN.md` and `@schema.ts` when implementing data logic.
+- Before writing complex logic, describe the plan in markdown first (unless tests already provided).
+- If a modification fails twice, restart in a new Chat thread with clean context.
