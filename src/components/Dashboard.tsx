@@ -1,4 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useState, type DragEvent } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type DragEvent,
+  type MouseEvent,
+} from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useI18n } from '../i18n/I18nContext';
 import {
@@ -18,19 +26,156 @@ import {
 } from '../lib/topics';
 import { TagsEditorDialog } from './TagsEditorDialog';
 import { extractDroppedTopicFile, pickTopicFile, readTopicFile, titleFromFileName } from '../lib/topicFile';
-import { importTopicCanvas } from '../store';
+import type { Memo } from '../schema';
+import {
+  notifyMemoEquipped,
+  notifyMemoUnequipped,
+  syncEquippedMemoFromMemos,
+} from '../lib/memoTauri';
+import { importTopicCanvas, useCanvasSelector, useCanvasStore } from '../store';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ImportLanguagePackButton } from './ImportLanguagePackButton';
 import { LocaleSwitcher } from './LocaleSwitcher';
 import { ThemeToggle } from './ThemeToggle';
+import { MemoEditor } from './MemoEditor';
+import {
+  DeleteConfirmPopover,
+  EquipToggle,
+  TrashIcon,
+  deleteConfirmAnchorFromEvent,
+  deleteMemoById,
+  type DeleteConfirmAnchor,
+} from './MemoSharedUi';
 import { TopicCard } from './TopicCard';
 import { TopicNameDialog } from './TopicNameDialog';
+
+type MemoEditorSession = {
+  memoId: string | null;
+  initialTitle: string;
+  initialContent: string;
+  initialBindings: Memo['bindings'];
+};
 
 const BTN =
   'rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm font-medium text-stone-700 shadow-sm hover:bg-stone-50 disabled:opacity-50 dark:border-stone-600 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700';
 
 const PRIMARY_BTN =
   'rounded-lg bg-stone-800 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-stone-900 disabled:opacity-50 dark:bg-stone-600 dark:hover:bg-stone-500';
+
+function memoTypeLabel(memo: Memo, t: (key: string) => string): string {
+  return memo.bindings.length > 0
+    ? t('dashboard.memo.typeBindable')
+    : t('dashboard.memo.typeEmpty');
+}
+
+interface MemoListPanelProps {
+  onNewMemo: () => void;
+  onEditMemo: (memo: Memo) => void;
+  onMemoDeleted?: (memoId: string) => void;
+}
+
+const MemoListPanel = memo(function MemoListPanel({
+  onNewMemo,
+  onEditMemo,
+  onMemoDeleted,
+}: MemoListPanelProps) {
+  const { t } = useI18n();
+  const memos = useCanvasSelector((s) => s.memos);
+  const dispatch = useCanvasSelector((s) => s.dispatch);
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    memo: Memo;
+    anchor: DeleteConfirmAnchor;
+  } | null>(null);
+
+  const handleEquipChange = useCallback(
+    (memoId: string, equipped: boolean) => {
+      const memo = memos.find((m) => m.id === memoId);
+      if (equipped) {
+        dispatch({ type: 'MEMO_EQUIPPED', payload: { memoId } });
+        if (memo) {
+          void notifyMemoEquipped({ ...memo, isEquipped: true });
+        }
+      } else {
+        dispatch({ type: 'MEMO_UNEQUIPPED', payload: { memoId } });
+        void notifyMemoUnequipped();
+      }
+    },
+    [dispatch, memos],
+  );
+
+  const openDeleteConfirm = useCallback((event: MouseEvent<HTMLButtonElement>, memo: Memo) => {
+    event.stopPropagation();
+    setDeleteConfirm({ memo, anchor: deleteConfirmAnchorFromEvent(event) });
+  }, []);
+
+  const confirmDeleteMemo = useCallback(() => {
+    if (!deleteConfirm) return;
+    const { id } = deleteConfirm.memo;
+    deleteMemoById(dispatch, deleteConfirm.memo);
+    onMemoDeleted?.(id);
+    setDeleteConfirm(null);
+  }, [deleteConfirm, dispatch, onMemoDeleted]);
+
+  return (
+    <aside className="flex w-1/4 min-w-0 flex-col border-r border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-800">
+      <div className="shrink-0 border-b border-stone-200 px-4 py-4 dark:border-stone-700">
+        <h2 className="text-sm font-semibold text-stone-900 dark:text-stone-100">
+          {t('dashboard.memo.title')}
+        </h2>
+        <button type="button" onClick={onNewMemo} className={`${PRIMARY_BTN} mt-3 w-full`}>
+          {t('dashboard.memo.new')}
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+        {memos.length === 0 ? (
+          <p className="px-2 py-6 text-center text-sm text-stone-500 dark:text-stone-400">
+            {t('dashboard.memo.empty')}
+          </p>
+        ) : (
+          <ul className="space-y-1">
+            {memos.map((memo) => (
+              <li
+                key={memo.id}
+                className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-stone-50 dark:hover:bg-stone-700/50"
+              >
+                <button
+                  type="button"
+                  aria-label={t('dashboard.memo.deleteMemo')}
+                  onClick={(e) => openDeleteConfirm(e, memo)}
+                  className="shrink-0 rounded p-1 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+                >
+                  <TrashIcon />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onEditMemo(memo)}
+                  className="min-w-0 flex-1 truncate rounded-md text-left text-sm font-medium text-stone-900 outline-none focus-visible:ring-2 focus-visible:ring-stone-400 dark:text-stone-100"
+                >
+                  {memo.title.trim() || t('common.untitled')}
+                </button>
+                <span className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-stone-600 dark:bg-stone-700 dark:text-stone-300">
+                  {memoTypeLabel(memo, t)}
+                </span>
+                <EquipToggle
+                  checked={memo.isEquipped}
+                  onChange={(equipped) => handleEquipChange(memo.id, equipped)}
+                  ariaLabel={t('dashboard.memo.equipToggle')}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {deleteConfirm && (
+        <DeleteConfirmPopover
+          anchor={deleteConfirm.anchor}
+          onConfirm={confirmDeleteMemo}
+          onCancel={() => setDeleteConfirm(null)}
+        />
+      )}
+    </aside>
+  );
+});
 
 export const Dashboard = memo(function Dashboard() {
   const { t } = useI18n();
@@ -49,6 +194,8 @@ export const Dashboard = memo(function Dashboard() {
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<'and' | 'or'>('or');
   const [newTopicDialogOpen, setNewTopicDialogOpen] = useState(false);
+  const [memoEditor, setMemoEditor] = useState<MemoEditorSession | null>(null);
+  const dispatch = useCanvasSelector((s) => s.dispatch);
 
   const refreshTopics = useCallback(async () => {
     setLoading(true);
@@ -71,6 +218,14 @@ export const Dashboard = memo(function Dashboard() {
   useEffect(() => {
     void refreshTopics();
   }, [refreshTopics]);
+
+  useEffect(() => {
+    void useCanvasStore
+      .getState()
+      .loadMemos()
+      .then(() => syncEquippedMemoFromMemos(useCanvasStore.getState().memos))
+      .catch(console.error);
+  }, []);
 
   const openTopic = useCallback(
     (topicId: string) => {
@@ -206,6 +361,55 @@ export const Dashboard = memo(function Dashboard() {
     [refreshTopics, tagsEditorTopic, t],
   );
 
+  const openNewMemoEditor = useCallback(() => {
+    setMemoEditor({
+      memoId: null,
+      initialTitle: '',
+      initialContent: '',
+      initialBindings: [],
+    });
+  }, []);
+
+  const openMemoEditor = useCallback((memo: Memo) => {
+    setMemoEditor({
+      memoId: memo.id,
+      initialTitle: memo.title,
+      initialContent: memo.content,
+      initialBindings: memo.bindings,
+    });
+  }, []);
+
+  const closeMemoEditor = useCallback(() => {
+    setMemoEditor(null);
+  }, []);
+
+  const handleDeleteMemoFromEditor = useCallback(() => {
+    if (!memoEditor?.memoId) return;
+    const memo = useCanvasStore.getState().memos.find((m) => m.id === memoEditor.memoId);
+    if (memo) {
+      deleteMemoById(dispatch, memo);
+    }
+    setMemoEditor(null);
+  }, [dispatch, memoEditor]);
+
+  const handleSaveMemo = useCallback(
+    (title: string, content: string, bindings: Memo['bindings']) => {
+      if (memoEditor?.memoId) {
+        dispatch({
+          type: 'MEMO_UPDATED',
+          payload: { id: memoEditor.memoId, changes: { title, content, bindings } },
+        });
+      } else {
+        dispatch({
+          type: 'MEMO_CREATED',
+          payload: { memo: { title, content, bindings } },
+        });
+      }
+      setMemoEditor(null);
+    },
+    [dispatch, memoEditor],
+  );
+
   const confirmDelete = useCallback(async () => {
     if (!deleteTarget) return;
     try {
@@ -268,7 +472,15 @@ export const Dashboard = memo(function Dashboard() {
         </div>
       </header>
 
-      <main className="flex-1 px-6 py-8">
+      <main className="flex min-h-0 flex-1">
+        <MemoListPanel
+          onNewMemo={openNewMemoEditor}
+          onEditMemo={openMemoEditor}
+          onMemoDeleted={(memoId) => {
+            if (memoEditor?.memoId === memoId) setMemoEditor(null);
+          }}
+        />
+        <section className="flex w-3/4 min-w-0 flex-col overflow-y-auto px-6 py-8">
         <div className="mb-6 space-y-3">
           <input
             type="search"
@@ -368,6 +580,7 @@ export const Dashboard = memo(function Dashboard() {
             ))}
           </ul>
         )}
+        </section>
       </main>
 
       {toast && (
@@ -382,6 +595,19 @@ export const Dashboard = memo(function Dashboard() {
           initialTags={tagsEditorTopic.tags}
           onSave={(tags) => void handleSaveTags(tags)}
           onCancel={() => setTagsEditorTopic(null)}
+        />
+      )}
+
+      {memoEditor && (
+        <MemoEditor
+          key={memoEditor.memoId ?? 'new'}
+          memoId={memoEditor.memoId}
+          initialTitle={memoEditor.initialTitle}
+          initialContent={memoEditor.initialContent}
+          initialBindings={memoEditor.initialBindings}
+          onSave={handleSaveMemo}
+          onCancel={closeMemoEditor}
+          onDelete={memoEditor.memoId ? handleDeleteMemoFromEditor : undefined}
         />
       )}
 

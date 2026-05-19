@@ -75,8 +75,26 @@ export const TopicCanvasSchema = z.object({
   top_nodes: z.array(z.string()).max(3).default([]),
 });
 
+// --- Memos (standalone, outside topics) ---
+export const MemoBindingSchema = z.object({
+  key: z.number().int().min(1).max(9),
+  label: z.string(),
+  text: z.string(),
+});
+
+export const MemoSchema = z.object({
+  id: z.string(),
+  title: z.string().default(''),
+  content: z.string().default(''),
+  bindings: z.array(MemoBindingSchema).default([]),
+  isEquipped: z.boolean().default(false),
+  created_at: z.number().default(() => Date.now()),
+  archived: z.boolean().default(false),
+});
+
 export type BusinessNode = z.infer<typeof BusinessNodeSchema>;
 export type BusinessEdge = z.infer<typeof BusinessEdgeSchema>;
 export type Experience = z.infer<typeof ExperienceSchema>;
 export type Modifier = z.infer<typeof ModifierSchema>;
 export type TopicCanvas = z.infer<typeof TopicCanvasSchema>;
+export type Memo = z.infer<typeof MemoSchema>;

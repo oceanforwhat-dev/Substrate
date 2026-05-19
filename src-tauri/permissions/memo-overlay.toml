@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-memo-overlay-commands"
+description = "Allows memo overlay IPC commands."
+commands.allow = ["get_equipped_memo", "set_equipped_memo", "close_memo_overlay", "clamp_memo_overlay_position", "notify_quick_copy_key"]

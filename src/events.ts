@@ -5,6 +5,8 @@ export const EventTypeEnum = [
     'EDGE_ADDED', 'EDGE_REMOVED',
     'MODIFIER_ATTACHED', 'MODIFIER_UPDATED', 'MODIFIER_REMOVED',
     'EXPERIENCE_CREATED', 'EXPERIENCE_UPDATED', 'EXPERIENCE_DELETED',
+    'MEMO_CREATED', 'MEMO_UPDATED', 'MEMO_DELETED',
+    'MEMO_BINDING_SET', 'MEMO_EQUIPPED', 'MEMO_UNEQUIPPED',
     'UNDO', 'REDO',
     'TOPIC_SAVED',
   ] as const;
@@ -33,6 +35,12 @@ export const EventTypeEnum = [
      * EXPERIENCE_CREATED  -> { experience: Experience }
      * EXPERIENCE_UPDATED  -> { id: string, changes: Partial<Experience> }
      * EXPERIENCE_DELETED  -> { id: string }
+     * MEMO_CREATED        -> { memo: Memo }
+     * MEMO_UPDATED        -> { id: string, changes: Partial<Memo> }
+     * MEMO_DELETED        -> { id: string }
+     * MEMO_BINDING_SET    -> { memoId: string, binding: { key: number, label: string, text: string } }
+     * MEMO_EQUIPPED       -> { memoId: string }
+     * MEMO_UNEQUIPPED     -> { memoId: string }
      * UNDO                -> { undone_event_id: string }
      * REDO                -> { redone_event_id: string }
      * TOPIC_SAVED         -> { topic_id: string, snapshot: TopicCanvas }

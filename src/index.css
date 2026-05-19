@@ -9,6 +9,13 @@ body,
   margin: 0;
 }
 
+html.overlay-window,
+html.overlay-window body,
+html.overlay-window #root {
+  background: transparent !important;
+  overflow: hidden;
+}
+
 @keyframes canvas-toast-in {
   from {
     opacity: 0;

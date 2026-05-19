@@ -7,10 +7,12 @@ import {
   BusinessEdgeSchema,
   BusinessNodeSchema,
   ExperienceSchema,
+  MemoSchema,
   ModifierSchema,
   type BusinessEdge,
   type BusinessNode,
   type Experience,
+  type Memo,
   type Modifier,
   type TopicCanvas,
 } from './schema';
@@ -20,9 +22,21 @@ import {
   type CommandTypeName,
   type ModifierTargetType,
 } from './commands';
+import { notifyMemoEquipped } from './lib/memoTauri';
 import { LOCAL_USER_ID, localSync, syncAdapter } from './sync';
 
 export { CommandType, type Command, type CommandTypeName, type ModifierTargetType };
+
+const MEMO_EVENT_TYPES = new Set<string>([
+  'MEMO_CREATED',
+  'MEMO_UPDATED',
+  'MEMO_DELETED',
+  'MEMO_BINDING_SET',
+  'MEMO_EQUIPPED',
+  'MEMO_UNEQUIPPED',
+]);
+
+const MEMO_TOPIC_ID = '';
 
 export interface CanvasStore {
   topicId: string;
@@ -30,6 +44,7 @@ export interface CanvasStore {
   nodes: BusinessNode[];
   edges: BusinessEdge[];
   experiences: Experience[];
+  memos: Memo[];
   undoStack: Command[];
   redoStack: Command[];
   dispatch: (command: Command) => void;
@@ -37,6 +52,7 @@ export interface CanvasStore {
   redo: () => void;
   saveTopic: () => Promise<void>;
   loadTopic: (topicId: string) => Promise<void>;
+  loadMemos: () => Promise<void>;
 }
 
 let postLoadFitView: (() => void) | null = null;
@@ -65,6 +81,26 @@ const AUTOSAVE_COMMAND_TYPES = new Set<CommandTypeName>([
   CommandType.CREATE_EXPERIENCE,
   CommandType.DELETE_EXPERIENCE,
 ]);
+
+async function pushMemoEvent(
+  eventType: EventType,
+  payload: Record<string, unknown>,
+): Promise<number> {
+  const event: SystemEvent = {
+    topic_id: MEMO_TOPIC_ID,
+    user_id: LOCAL_USER_ID,
+    event_type: eventType,
+    payload,
+    client_timestamp: Date.now(),
+  };
+
+  await syncAdapter.push(event);
+  if (event.id == null) {
+    throw new Error(`pushMemoEvent: syncAdapter did not assign event id for ${eventType}`);
+  }
+
+  return event.id;
+}
 
 async function pushEvent(
   topicId: string,
@@ -346,6 +382,62 @@ function findEdge(edges: BusinessEdge[], id: string): BusinessEdge {
   return edge;
 }
 
+function findMemo(memos: Memo[], id: string): Memo {
+  const memo = memos.find((m) => m.id === id);
+  if (!memo) {
+    throw new Error(`CanvasStore: memo not found: ${id}`);
+  }
+  return memo;
+}
+
+async function upsertMemoRow(memo: Memo): Promise<void> {
+  await db.memos.put({ ...memo, updated_at: Date.now() });
+}
+
+async function deleteMemoRow(id: string): Promise<void> {
+  await db.memos.delete(id);
+}
+
+async function recordMemoEvent(executed: Command): Promise<void> {
+  switch (executed.type) {
+    case 'MEMO_CREATED': {
+      const memo = executed.payload?.memo as Memo;
+      await pushMemoEvent('MEMO_CREATED', { memo });
+      break;
+    }
+    case 'MEMO_UPDATED': {
+      const { id, changes } = executed.payload as { id: string; changes: Partial<Memo> };
+      await pushMemoEvent('MEMO_UPDATED', { id, changes });
+      break;
+    }
+    case 'MEMO_DELETED': {
+      const { id } = executed.payload as { id: string };
+      await pushMemoEvent('MEMO_DELETED', { id });
+      break;
+    }
+    case 'MEMO_BINDING_SET': {
+      const { memoId, binding } = executed.payload as {
+        memoId: string;
+        binding: { key: number; label: string; text: string };
+      };
+      await pushMemoEvent('MEMO_BINDING_SET', { memoId, binding });
+      break;
+    }
+    case 'MEMO_EQUIPPED': {
+      const { memoId } = executed.payload as { memoId: string };
+      await pushMemoEvent('MEMO_EQUIPPED', { memoId });
+      break;
+    }
+    case 'MEMO_UNEQUIPPED': {
+      const { memoId } = executed.payload as { memoId: string };
+      await pushMemoEvent('MEMO_UNEQUIPPED', { memoId });
+      break;
+    }
+    default:
+      throw new Error(`recordMemoEvent: unsupported command "${executed.type}"`);
+  }
+}
+
 function removeEdgeFromExperienceTargets(
   experiences: Experience[],
   edgeId: string,
@@ -605,11 +697,146 @@ function applyStateChange(
   throw new Error(`CanvasStore: unhandled command type "${command.type}"`);
 }
 
+function applyMemoStateChange(
+  set: (fn: (state: CanvasStore) => Partial<CanvasStore>) => void,
+  get: () => CanvasStore,
+  command: Command,
+): Command {
+  const state = get();
+
+  if (command.type === 'MEMO_CREATED') {
+    const input = (command.payload?.memo ?? command.payload) as Record<string, unknown>;
+    const id =
+      typeof input.id === 'string' && input.id.length > 0
+        ? input.id
+        : crypto.randomUUID();
+    const memo = MemoSchema.parse({ ...input, id });
+    set((s) => ({ memos: [...s.memos, memo] }));
+    return { type: 'MEMO_CREATED', payload: { memo } };
+  }
+
+  if (command.type === 'MEMO_UPDATED') {
+    const id = command.payload?.id as string;
+    const changes = command.payload?.changes as Partial<Memo>;
+    findMemo(state.memos, id);
+    set((s) => ({
+      memos: s.memos.map((m) =>
+        m.id === id ? MemoSchema.parse({ ...m, ...changes }) : m,
+      ),
+    }));
+    return { type: 'MEMO_UPDATED', payload: { id, changes } };
+  }
+
+  if (command.type === 'MEMO_DELETED') {
+    const id = command.payload?.id as string;
+    findMemo(state.memos, id);
+    set((s) => ({ memos: s.memos.filter((m) => m.id !== id) }));
+    return { type: 'MEMO_DELETED', payload: { id } };
+  }
+
+  if (command.type === 'MEMO_BINDING_SET') {
+    const memoId = command.payload?.memoId as string;
+    const binding = command.payload?.binding as { key: number; label: string; text: string };
+    findMemo(state.memos, memoId);
+    set((s) => ({
+      memos: s.memos.map((m) => {
+        if (m.id !== memoId) return m;
+        const withoutKey = m.bindings.filter((b) => b.key !== binding.key);
+        return MemoSchema.parse({
+          ...m,
+          bindings: [...withoutKey, binding],
+        });
+      }),
+    }));
+    return { type: 'MEMO_BINDING_SET', payload: { memoId, binding } };
+  }
+
+  if (command.type === 'MEMO_EQUIPPED') {
+    const memoId = command.payload?.memoId as string;
+    findMemo(state.memos, memoId);
+    set((s) => ({
+      memos: s.memos.map((m) => ({
+        ...m,
+        isEquipped: m.id === memoId,
+      })),
+    }));
+    return { type: 'MEMO_EQUIPPED', payload: { memoId } };
+  }
+
+  if (command.type === 'MEMO_UNEQUIPPED') {
+    const memoId = command.payload?.memoId as string;
+    findMemo(state.memos, memoId);
+    set((s) => ({
+      memos: s.memos.map((m) =>
+        m.id === memoId ? { ...m, isEquipped: false } : m,
+      ),
+    }));
+    return { type: 'MEMO_UNEQUIPPED', payload: { memoId } };
+  }
+
+  throw new Error(`CanvasStore: unhandled memo command type "${command.type}"`);
+}
+
+async function syncEquippedMemoToBackend(executed: Command, memos: Memo[]): Promise<void> {
+  const equipped = memos.find((m) => m.isEquipped);
+  if (!equipped) return;
+
+  if (executed.type === 'MEMO_UPDATED') {
+    const { id } = executed.payload as { id: string };
+    if (id !== equipped.id) return;
+  } else if (executed.type === 'MEMO_BINDING_SET') {
+    const { memoId } = executed.payload as { memoId: string };
+    if (memoId !== equipped.id) return;
+  } else {
+    return;
+  }
+
+  await notifyMemoEquipped(equipped);
+}
+
+async function persistMemoStateChange(executed: Command, memos: Memo[]): Promise<void> {
+  switch (executed.type) {
+    case 'MEMO_CREATED': {
+      const memo = executed.payload?.memo as Memo;
+      await upsertMemoRow(memo);
+      break;
+    }
+    case 'MEMO_UPDATED':
+    case 'MEMO_BINDING_SET':
+    case 'MEMO_UNEQUIPPED': {
+      const { memoId, id } = executed.payload as { memoId?: string; id?: string };
+      const targetId = memoId ?? id;
+      if (!targetId) {
+        throw new Error(`persistMemoStateChange: missing memo id for ${executed.type}`);
+      }
+      await upsertMemoRow(findMemo(memos, targetId));
+      break;
+    }
+    case 'MEMO_EQUIPPED': {
+      await Promise.all(memos.map((memo) => upsertMemoRow(memo)));
+      break;
+    }
+    case 'MEMO_DELETED': {
+      const { id } = executed.payload as { id: string };
+      await deleteMemoRow(id);
+      break;
+    }
+    default:
+      throw new Error(`persistMemoStateChange: unsupported command "${executed.type}"`);
+  }
+}
+
 function pushUndo(set: (fn: (state: CanvasStore) => Partial<CanvasStore>) => void, command: Command): void {
   set((s) => ({
     undoStack: [...s.undoStack, command].slice(-MAX_UNDO_DEPTH),
     redoStack: [],
   }));
+}
+
+export async function loadMemos(): Promise<void> {
+  const rows = await db.memos.toArray();
+  const memos = rows.map(({ updated_at: _updatedAt, ...memo }) => MemoSchema.parse(memo));
+  useCanvasStore.setState({ memos });
 }
 
 export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
@@ -618,13 +845,30 @@ export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
   nodes: [],
   edges: [],
   experiences: [],
+  memos: [],
   undoStack: [],
   redoStack: [],
 
   saveTopic,
   loadTopic,
+  loadMemos,
 
   dispatch: (command: Command) => {
+    if (MEMO_EVENT_TYPES.has(command.type)) {
+      const executed = applyMemoStateChange(set, get, command);
+      void (async () => {
+        try {
+          const memos = get().memos;
+          await persistMemoStateChange(executed, memos);
+          await recordMemoEvent(executed);
+          await syncEquippedMemoToBackend(executed, memos);
+        } catch (err) {
+          console.error(err);
+        }
+      })();
+      return;
+    }
+
     const { topicId } = get();
     if (!topicId) {
       throw new Error('CanvasStore.dispatch: topicId is not set');

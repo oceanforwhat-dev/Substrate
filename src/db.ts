@@ -1,5 +1,5 @@
 import Dexie, { type Table } from 'dexie';
-import type { TopicCanvas } from './schema';
+import type { Memo, TopicCanvas } from './schema';
 
 export interface TopicRow {
   id: string;
@@ -32,10 +32,13 @@ export interface SnapshotRow {
   redo_stack: PersistedCommand[];
 }
 
+export type MemoRow = Memo & { updated_at: number };
+
 export class SubstrateDB extends Dexie {
   topics!: Table<TopicRow, string>;
   events!: Table<EventRow, number>;
   snapshots!: Table<SnapshotRow, string>;
+  memos!: Table<MemoRow, string>;
 
   constructor(name = 'SubstrateDB') {
     super(name);
@@ -43,6 +46,12 @@ export class SubstrateDB extends Dexie {
       topics: 'id, updated_at',
       events: '++local_id, topic_id, event_type, client_timestamp',
       snapshots: 'topic_id',
+    });
+    this.version(2).stores({
+      topics: 'id, updated_at',
+      events: '++local_id, topic_id, event_type, client_timestamp',
+      snapshots: 'topic_id',
+      memos: 'id, title, updated_at',
     });
   }
 }
