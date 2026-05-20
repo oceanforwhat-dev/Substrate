@@ -1,5 +1,28 @@
 # Changelog
 
+## Beta 0.0.4 — Multi-Equip & Memo Switching - 2026/5/20
+
+### Added
+- Multi-equip: equip multiple memos simultaneously, reorder via drag-and-drop in Dashboard
+- Memo switching on overlay: Ctrl+Left/Right keyboard shortcuts to cycle equipped memos
+- Overlay navigation arrows (< >) and clickable title dropdown for quick memo jump
+- Crossfade animation on memo switch (opacity transition, ~200ms)
+- Equipped memos group in Dashboard with order badges and drag-to-reorder
+- "Unequip all" button to clear equipped memos at once
+- `currentFocusedMemoId` persists across overlay open/close cycles
+- Auto-migration: if focused memo is unequipped, focus moves to next equipped memo
+
+### Changed
+- Equip toggle replaced with bookmark/star icon button
+- Memo list split into "Equipped" (top) and "All Memos" (bottom) groups
+- Arrow key switch cooldown reduced from 300ms to 100ms for faster response
+- Dashboard no longer sets focused memo on click — focus managed entirely by overlay
+
+### Technical
+- `MemoSchema`: `isEquipped` replaced with `equipped: boolean` + `equippedOrder: number`
+- New `app_state` IndexedDB table for persistent app-level state
+- New events: `MEMO_REORDER`, `FOCUSED_MEMO_CHANGED`
+- Rust polling loop: Ctrl+Arrow detection with debounce, `switch-memo` Tauri event
 ## Beta 0.0.3 — Memo Overlay & Quick Copy - 2026/5/19
 
 ### Added
