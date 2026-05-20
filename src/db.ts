@@ -34,11 +34,17 @@ export interface SnapshotRow {
 
 export type MemoRow = Memo & { updated_at: number };
 
+export interface AppStateRow {
+  key: string;
+  value: unknown;
+}
+
 export class SubstrateDB extends Dexie {
   topics!: Table<TopicRow, string>;
   events!: Table<EventRow, number>;
   snapshots!: Table<SnapshotRow, string>;
   memos!: Table<MemoRow, string>;
+  app_state!: Table<AppStateRow, string>;
 
   constructor(name = 'SubstrateDB') {
     super(name);
@@ -52,6 +58,13 @@ export class SubstrateDB extends Dexie {
       events: '++local_id, topic_id, event_type, client_timestamp',
       snapshots: 'topic_id',
       memos: 'id, title, updated_at',
+    });
+    this.version(3).stores({
+      topics: 'id, updated_at',
+      events: '++local_id, topic_id, event_type, client_timestamp',
+      snapshots: 'topic_id',
+      memos: 'id, title, updated_at',
+      app_state: 'key',
     });
   }
 }

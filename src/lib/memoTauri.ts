@@ -15,11 +15,20 @@ export async function notifyMemoUnequipped(): Promise<void> {
   await emit('memo-unequipped', null);
 }
 
-export async function syncEquippedMemoFromMemos(memos: Memo[]): Promise<void> {
+export async function syncEquippedMemoFromMemos(
+  memos: Memo[],
+  currentFocusedMemoId: string | null = null,
+): Promise<void> {
   if (!isTauriRuntime()) return;
-  const equipped = memos.find((m) => m.isEquipped);
-  if (equipped) {
-    await notifyMemoEquipped(equipped);
+  const focused =
+    (currentFocusedMemoId
+      ? memos.find((m) => m.id === currentFocusedMemoId)
+      : undefined) ??
+    memos
+      .filter((m) => m.equipped)
+      .sort((a, b) => a.equippedOrder - b.equippedOrder)[0];
+  if (focused?.equipped) {
+    await notifyMemoEquipped(focused);
   } else {
     await notifyMemoUnequipped();
   }

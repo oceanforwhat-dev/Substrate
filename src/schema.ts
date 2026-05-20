@@ -87,9 +87,15 @@ export const MemoSchema = z.object({
   title: z.string().default(''),
   content: z.string().default(''),
   bindings: z.array(MemoBindingSchema).default([]),
-  isEquipped: z.boolean().default(false),
+  equipped: z.boolean().default(false),
+  equippedOrder: z.number().default(0),
   created_at: z.number().default(() => Date.now()),
   archived: z.boolean().default(false),
+});
+
+export const AppStateSchema = z.object({
+  key: z.string(),
+  value: z.any(),
 });
 
 export type BusinessNode = z.infer<typeof BusinessNodeSchema>;
@@ -98,3 +104,4 @@ export type Experience = z.infer<typeof ExperienceSchema>;
 export type Modifier = z.infer<typeof ModifierSchema>;
 export type TopicCanvas = z.infer<typeof TopicCanvasSchema>;
 export type Memo = z.infer<typeof MemoSchema>;
+export type AppState = z.infer<typeof AppStateSchema>;

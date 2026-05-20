@@ -7,6 +7,7 @@ export const EventTypeEnum = [
     'EXPERIENCE_CREATED', 'EXPERIENCE_UPDATED', 'EXPERIENCE_DELETED',
     'MEMO_CREATED', 'MEMO_UPDATED', 'MEMO_DELETED',
     'MEMO_BINDING_SET', 'MEMO_EQUIPPED', 'MEMO_UNEQUIPPED',
+    'MEMO_REORDER', 'FOCUSED_MEMO_CHANGED',
     'UNDO', 'REDO',
     'TOPIC_SAVED',
   ] as const;
@@ -39,8 +40,10 @@ export const EventTypeEnum = [
      * MEMO_UPDATED        -> { id: string, changes: Partial<Memo> }
      * MEMO_DELETED        -> { id: string }
      * MEMO_BINDING_SET    -> { memoId: string, binding: { key: number, label: string, text: string } }
-     * MEMO_EQUIPPED       -> { memoId: string }
-     * MEMO_UNEQUIPPED     -> { memoId: string }
+     * MEMO_EQUIPPED       -> { memoId: string } — memo added to equipped list
+     * MEMO_UNEQUIPPED     -> { memoId: string } — memo removed from equipped list
+     * MEMO_REORDER        -> { orderedIds: string[] } — equipped memos reordered via drag
+     * FOCUSED_MEMO_CHANGED -> { memoId: string | null } — current focused memo changed
      * UNDO                -> { undone_event_id: string }
      * REDO                -> { redone_event_id: string }
      * TOPIC_SAVED         -> { topic_id: string, snapshot: TopicCanvas }

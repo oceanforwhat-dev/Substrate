@@ -5,9 +5,9 @@ import type { CanvasStore } from '../store';
 
 export function deleteMemoById(
   dispatch: CanvasStore['dispatch'],
-  memo: Pick<Memo, 'id' | 'isEquipped'>,
+  memo: Pick<Memo, 'id' | 'equipped'>,
 ): void {
-  if (memo.isEquipped) {
+  if (memo.equipped) {
     dispatch({ type: 'MEMO_UNEQUIPPED', payload: { memoId: memo.id } });
   }
   dispatch({ type: 'MEMO_DELETED', payload: { id: memo.id } });

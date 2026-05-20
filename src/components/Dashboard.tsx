@@ -27,11 +27,7 @@ import {
 import { TagsEditorDialog } from './TagsEditorDialog';
 import { extractDroppedTopicFile, pickTopicFile, readTopicFile, titleFromFileName } from '../lib/topicFile';
 import type { Memo } from '../schema';
-import {
-  notifyMemoEquipped,
-  notifyMemoUnequipped,
-  syncEquippedMemoFromMemos,
-} from '../lib/memoTauri';
+import { notifyMemoUnequipped, syncEquippedMemoFromMemos } from '../lib/memoTauri';
 import { importTopicCanvas, useCanvasSelector, useCanvasStore } from '../store';
 import { ConfirmDialog } from './ConfirmDialog';
 import { ImportLanguagePackButton } from './ImportLanguagePackButton';
@@ -40,7 +36,6 @@ import { ThemeToggle } from './ThemeToggle';
 import { MemoEditor } from './MemoEditor';
 import {
   DeleteConfirmPopover,
-  EquipToggle,
   TrashIcon,
   deleteConfirmAnchorFromEvent,
   deleteMemoById,
@@ -68,6 +63,112 @@ function memoTypeLabel(memo: Memo, t: (key: string) => string): string {
     : t('dashboard.memo.typeEmpty');
 }
 
+function EquipIcon({ equipped }: { equipped: boolean }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 20 20"
+      fill={equipped ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth={equipped ? 0 : 1.5}
+      className={`size-4 ${equipped ? 'text-amber-500 dark:text-amber-400' : 'text-stone-400 dark:text-stone-500'}`}
+      aria-hidden
+    >
+      <path d="M10 2l2.09 4.24 4.68.68-3.39 3.3.8 4.66L10 12.9l-4.18 2.2.8-4.66-3.39-3.3 4.68-.68L10 2z" />
+    </svg>
+  );
+}
+
+interface MemoRowProps {
+  memo: Memo;
+  orderBadge?: number;
+  draggable?: boolean;
+  isDragging?: boolean;
+  isDragOver?: boolean;
+  equipLabel: string;
+  deleteLabel: string;
+  typeLabel: string;
+  untitledLabel: string;
+  onEquipToggle: (memo: Memo) => void;
+  onEdit: (memo: Memo) => void;
+  onDelete: (event: MouseEvent<HTMLButtonElement>, memo: Memo) => void;
+  onDragStart?: (event: DragEvent<HTMLLIElement>, memoId: string) => void;
+  onDragEnd?: () => void;
+  onDragOver?: (event: DragEvent<HTMLLIElement>, memoId: string) => void;
+  onDragLeave?: () => void;
+  onDrop?: (event: DragEvent<HTMLLIElement>, memoId: string) => void;
+}
+
+const MemoRow = memo(function MemoRow({
+  memo,
+  orderBadge,
+  draggable = false,
+  isDragging = false,
+  isDragOver = false,
+  equipLabel,
+  deleteLabel,
+  typeLabel,
+  untitledLabel,
+  onEquipToggle,
+  onEdit,
+  onDelete,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+}: MemoRowProps) {
+  return (
+    <li
+      draggable={draggable}
+      onDragStart={onDragStart ? (e) => onDragStart(e, memo.id) : undefined}
+      onDragEnd={onDragEnd}
+      onDragOver={onDragOver ? (e) => onDragOver(e, memo.id) : undefined}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop ? (e) => onDrop(e, memo.id) : undefined}
+      className={`flex items-center gap-2 rounded-lg px-2 py-2 transition-colors hover:bg-stone-50 dark:hover:bg-stone-700/50 ${isDragging ? 'opacity-40' : ''} ${isDragOver ? 'ring-2 ring-amber-400/60 ring-inset' : ''}`}
+    >
+      <button
+        type="button"
+        aria-label={equipLabel}
+        onClick={(e) => {
+          e.stopPropagation();
+          onEquipToggle(memo);
+        }}
+        className="shrink-0 rounded p-1 hover:bg-stone-100 dark:hover:bg-stone-700"
+      >
+        <EquipIcon equipped={memo.equipped} />
+      </button>
+      {orderBadge != null && (
+        <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-stone-200 text-[10px] font-semibold text-stone-700 dark:bg-stone-600 dark:text-stone-200">
+          {orderBadge}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onEdit(memo);
+        }}
+        className="min-w-0 flex-1 truncate rounded-md text-left text-sm font-medium text-stone-900 outline-none focus-visible:ring-2 focus-visible:ring-stone-400 dark:text-stone-100"
+      >
+        {memo.title.trim() || untitledLabel}
+      </button>
+      <span className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-stone-600 dark:bg-stone-700 dark:text-stone-300">
+        {typeLabel}
+      </span>
+      <button
+        type="button"
+        aria-label={deleteLabel}
+        onClick={(e) => onDelete(e, memo)}
+        className="shrink-0 rounded p-1 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
+      >
+        <TrashIcon />
+      </button>
+    </li>
+  );
+});
+
 interface MemoListPanelProps {
   onNewMemo: () => void;
   onEditMemo: (memo: Memo) => void;
@@ -81,27 +182,76 @@ const MemoListPanel = memo(function MemoListPanel({
 }: MemoListPanelProps) {
   const { t } = useI18n();
   const memos = useCanvasSelector((s) => s.memos);
+  const equippedMemos = useCanvasSelector((s) => s.equippedMemos);
   const dispatch = useCanvasSelector((s) => s.dispatch);
   const [deleteConfirm, setDeleteConfirm] = useState<{
     memo: Memo;
     anchor: DeleteConfirmAnchor;
   } | null>(null);
+  const [dragMemoId, setDragMemoId] = useState<string | null>(null);
+  const [dragOverMemoId, setDragOverMemoId] = useState<string | null>(null);
 
-  const handleEquipChange = useCallback(
-    (memoId: string, equipped: boolean) => {
-      const memo = memos.find((m) => m.id === memoId);
-      if (equipped) {
-        dispatch({ type: 'MEMO_EQUIPPED', payload: { memoId } });
-        if (memo) {
-          void notifyMemoEquipped({ ...memo, isEquipped: true });
-        }
+  const syncTauri = useCallback(() => {
+    const { memos: nextMemos, currentFocusedMemoId: focusedId } = useCanvasStore.getState();
+    void syncEquippedMemoFromMemos(nextMemos, focusedId);
+  }, []);
+
+  const handleEquipToggle = useCallback(
+    (memo: Memo) => {
+      if (memo.equipped) {
+        dispatch({ type: 'MEMO_UNEQUIPPED', payload: { memoId: memo.id } });
       } else {
-        dispatch({ type: 'MEMO_UNEQUIPPED', payload: { memoId } });
-        void notifyMemoUnequipped();
+        dispatch({ type: 'MEMO_EQUIPPED', payload: { memoId: memo.id } });
       }
+      syncTauri();
     },
-    [dispatch, memos],
+    [dispatch, syncTauri],
   );
+
+  const handleUnequipAll = useCallback(() => {
+    for (const memo of equippedMemos) {
+      dispatch({ type: 'MEMO_UNEQUIPPED', payload: { memoId: memo.id } });
+    }
+    void notifyMemoUnequipped();
+  }, [dispatch, equippedMemos]);
+
+  const handleReorderDrop = useCallback(
+    (event: DragEvent<HTMLLIElement>, targetMemoId: string) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!dragMemoId || dragMemoId === targetMemoId) return;
+      const orderedIds = equippedMemos.map((m) => m.id);
+      const fromIdx = orderedIds.indexOf(dragMemoId);
+      const toIdx = orderedIds.indexOf(targetMemoId);
+      if (fromIdx === -1 || toIdx === -1) return;
+      const next = [...orderedIds];
+      next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, dragMemoId);
+      dispatch({ type: 'MEMO_REORDER', payload: { orderedIds: next } });
+      setDragMemoId(null);
+      setDragOverMemoId(null);
+    },
+    [dispatch, dragMemoId, equippedMemos],
+  );
+
+  const handleDragStart = useCallback((event: DragEvent<HTMLLIElement>, memoId: string) => {
+    setDragMemoId(memoId);
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', memoId);
+  }, []);
+
+  const handleDragOver = useCallback((event: DragEvent<HTMLLIElement>, memoId: string) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    setDragOverMemoId(memoId);
+  }, []);
+
+  const handleDragEnd = useCallback(() => {
+    setDragMemoId(null);
+    setDragOverMemoId(null);
+  }, []);
+
+  const unequippedMemos = useMemo(() => memos.filter((m) => !m.equipped), [memos]);
 
   const openDeleteConfirm = useCallback((event: MouseEvent<HTMLButtonElement>, memo: Memo) => {
     event.stopPropagation();
@@ -114,7 +264,16 @@ const MemoListPanel = memo(function MemoListPanel({
     deleteMemoById(dispatch, deleteConfirm.memo);
     onMemoDeleted?.(id);
     setDeleteConfirm(null);
-  }, [deleteConfirm, dispatch, onMemoDeleted]);
+    syncTauri();
+  }, [deleteConfirm, dispatch, onMemoDeleted, syncTauri]);
+
+  const sharedRowProps = {
+    onEquipToggle: handleEquipToggle,
+    onEdit: onEditMemo,
+    onDelete: openDeleteConfirm,
+    deleteLabel: t('dashboard.memo.deleteMemo'),
+    untitledLabel: t('common.untitled'),
+  };
 
   return (
     <aside className="flex w-1/4 min-w-0 flex-col border-r border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-800">
@@ -132,38 +291,76 @@ const MemoListPanel = memo(function MemoListPanel({
             {t('dashboard.memo.empty')}
           </p>
         ) : (
-          <ul className="space-y-1">
-            {memos.map((memo) => (
-              <li
-                key={memo.id}
-                className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-stone-50 dark:hover:bg-stone-700/50"
-              >
-                <button
-                  type="button"
-                  aria-label={t('dashboard.memo.deleteMemo')}
-                  onClick={(e) => openDeleteConfirm(e, memo)}
-                  className="shrink-0 rounded p-1 text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                >
-                  <TrashIcon />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onEditMemo(memo)}
-                  className="min-w-0 flex-1 truncate rounded-md text-left text-sm font-medium text-stone-900 outline-none focus-visible:ring-2 focus-visible:ring-stone-400 dark:text-stone-100"
-                >
-                  {memo.title.trim() || t('common.untitled')}
-                </button>
-                <span className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-stone-600 dark:bg-stone-700 dark:text-stone-300">
-                  {memoTypeLabel(memo, t)}
-                </span>
-                <EquipToggle
-                  checked={memo.isEquipped}
-                  onChange={(equipped) => handleEquipChange(memo.id, equipped)}
-                  ariaLabel={t('dashboard.memo.equipToggle')}
-                />
-              </li>
-            ))}
-          </ul>
+          <div className="space-y-4">
+            <section className="rounded-lg border border-stone-200 bg-stone-50/50 p-2 dark:border-stone-600 dark:bg-stone-900/40">
+              <div className="mb-2 flex items-center justify-between gap-2 px-1">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400">
+                  {t('dashboard.memo.equippedGroup')}
+                </h3>
+                {equippedMemos.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleUnequipAll}
+                    className="text-[11px] font-medium text-stone-500 underline-offset-2 hover:text-stone-800 hover:underline dark:text-stone-400 dark:hover:text-stone-200"
+                  >
+                    {t('dashboard.memo.unequipAll')}
+                  </button>
+                )}
+              </div>
+              {equippedMemos.length === 0 ? (
+                <p className="px-2 py-3 text-center text-xs text-stone-400 dark:text-stone-500">
+                  —
+                </p>
+              ) : (
+                <ul className="space-y-1">
+                  {equippedMemos.map((memo) => (
+                    <MemoRow
+                      key={memo.id}
+                      memo={memo}
+                      orderBadge={memo.equippedOrder}
+                      draggable
+                      isDragging={dragMemoId === memo.id}
+                      isDragOver={dragOverMemoId === memo.id && dragMemoId !== memo.id}
+                      equipLabel={
+                        memo.equipped
+                          ? t('dashboard.memo.unequipMemo')
+                          : t('dashboard.memo.equipMemo')
+                      }
+                      typeLabel={memoTypeLabel(memo, t)}
+                      onDragStart={handleDragStart}
+                      onDragEnd={handleDragEnd}
+                      onDragOver={handleDragOver}
+                      onDragLeave={() => setDragOverMemoId(null)}
+                      onDrop={handleReorderDrop}
+                      {...sharedRowProps}
+                    />
+                  ))}
+                </ul>
+              )}
+            </section>
+            <section>
+              <h3 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-stone-500 dark:text-stone-400">
+                {t('dashboard.memo.allMemos')}
+              </h3>
+              {unequippedMemos.length === 0 ? (
+                <p className="px-2 py-3 text-center text-xs text-stone-400 dark:text-stone-500">
+                  —
+                </p>
+              ) : (
+                <ul className="space-y-1">
+                  {unequippedMemos.map((memo) => (
+                    <MemoRow
+                      key={memo.id}
+                      memo={memo}
+                      equipLabel={t('dashboard.memo.equipMemo')}
+                      typeLabel={memoTypeLabel(memo, t)}
+                      {...sharedRowProps}
+                    />
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
         )}
       </div>
       {deleteConfirm && (
@@ -223,7 +420,10 @@ export const Dashboard = memo(function Dashboard() {
     void useCanvasStore
       .getState()
       .loadMemos()
-      .then(() => syncEquippedMemoFromMemos(useCanvasStore.getState().memos))
+      .then(() => {
+        const { memos: loaded, currentFocusedMemoId } = useCanvasStore.getState();
+        return syncEquippedMemoFromMemos(loaded, currentFocusedMemoId);
+      })
       .catch(console.error);
   }, []);
 

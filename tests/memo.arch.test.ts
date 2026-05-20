@@ -23,7 +23,7 @@ describe('memo architecture smoke', () => {
     });
   });
 
-  it('creates, equips, and enforces single equipped memo via dispatch', async () => {
+  it('creates and equips multiple memos via dispatch', async () => {
     const { dispatch } = useCanvasStore.getState();
     const memoId1 = crypto.randomUUID();
 
@@ -36,7 +36,7 @@ describe('memo architecture smoke', () => {
     expect(useCanvasStore.getState().memos[0]).toMatchObject({
       id: memoId1,
       title: 'First Memo',
-      isEquipped: false,
+      equipped: false,
     });
 
     await vi.waitFor(async () => {
@@ -53,7 +53,7 @@ describe('memo architecture smoke', () => {
 
     dispatch({ type: 'MEMO_EQUIPPED', payload: { memoId: memoId1 } });
 
-    expect(useCanvasStore.getState().memos[0]?.isEquipped).toBe(true);
+    expect(useCanvasStore.getState().memos[0]?.equipped).toBe(true);
 
     const memoId2 = crypto.randomUUID();
     dispatch({
@@ -67,7 +67,7 @@ describe('memo architecture smoke', () => {
     const first = memos.find((m) => m.id === memoId1);
     const second = memos.find((m) => m.id === memoId2);
 
-    expect(first?.isEquipped).toBe(false);
-    expect(second?.isEquipped).toBe(true);
+    expect(first?.equipped).toBe(true);
+    expect(second?.equipped).toBe(true);
   });
 });

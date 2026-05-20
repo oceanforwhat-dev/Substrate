@@ -1,4 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Set by memo switch polling when a non-tap key is pressed while Ctrl is held (e.g. arrows).
+static CTRL_CHORD_BLOCK_TAP: AtomicBool = AtomicBool::new(false);
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -32,6 +35,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(8);
 const SHIFT_DOUBLE_PRESS_WINDOW: Duration = Duration::from_millis(400);
 const CTRL_TAP_MAX_DURATION: Duration = Duration::from_millis(400);
 const OVERLAY_FADE_OUT: Duration = Duration::from_millis(150);
+const MEMO_SWITCH_COOLDOWN: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Default)]
 pub struct EquippedMemoState(pub Arc<Mutex<Option<String>>>);
@@ -304,6 +308,12 @@ impl CtrlTapTracker {
     }
 
     fn on_ctrl_up(&mut self, app: &AppHandle, quick_copy: &QuickCopyModeState) {
+        if CTRL_CHORD_BLOCK_TAP.swap(false, Ordering::SeqCst) {
+            log::info!("[ctrl-diag] tap skipped: chord key pressed during ctrl hold");
+            self.phase = CtrlTapPhase::Idle;
+            return;
+        }
+
         let tap = match self.phase {
             CtrlTapPhase::Pressed { press_at }
                 if press_at.elapsed() <= CTRL_TAP_MAX_DURATION =>
@@ -339,6 +349,75 @@ impl CtrlTapTracker {
             }
         });
     }
+}
+
+#[derive(Serialize)]
+struct SwitchMemoPayload {
+    direction: &'static str,
+}
+
+struct MemoSwitchKeyTracker {
+    left_was_pressed: bool,
+    right_was_pressed: bool,
+    last_switch_at: Option<Instant>,
+}
+
+impl MemoSwitchKeyTracker {
+    fn new() -> Self {
+        Self {
+            left_was_pressed: false,
+            right_was_pressed: false,
+            last_switch_at: None,
+        }
+    }
+
+    fn update(&mut self, app: &AppHandle, ctrl_pressed: bool) {
+        if !overlay_is_visible(app) {
+            self.left_was_pressed = false;
+            self.right_was_pressed = false;
+            CTRL_CHORD_BLOCK_TAP.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        let (left_arrow, right_arrow) = poll_arrow_keys();
+
+        if !ctrl_pressed {
+            CTRL_CHORD_BLOCK_TAP.store(false, Ordering::SeqCst);
+        } else if left_arrow || right_arrow {
+            CTRL_CHORD_BLOCK_TAP.store(true, Ordering::SeqCst);
+        }
+
+        if ctrl_pressed {
+            if left_arrow && !self.left_was_pressed {
+                self.try_emit_switch(app, "prev");
+            }
+            if right_arrow && !self.right_was_pressed {
+                self.try_emit_switch(app, "next");
+            }
+        }
+
+        self.left_was_pressed = left_arrow;
+        self.right_was_pressed = right_arrow;
+    }
+
+    fn try_emit_switch(&mut self, app: &AppHandle, direction: &'static str) {
+        if let Some(last) = self.last_switch_at {
+            if last.elapsed() < MEMO_SWITCH_COOLDOWN {
+                return;
+            }
+        }
+        self.last_switch_at = Some(Instant::now());
+        log::info!("[switch-diag] switch-memo direction={direction}");
+        emit_switch_memo(app, direction);
+    }
+}
+
+fn emit_switch_memo(app: &AppHandle, direction: &'static str) {
+    let payload = SwitchMemoPayload { direction };
+    if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
+        let _ = window.emit("switch-memo", &payload);
+    }
+    let _ = app.emit("switch-memo", &payload);
 }
 
 struct QuickCopyKeyTracker {
@@ -658,6 +737,23 @@ fn poll_ctrl_keys() -> (bool, bool) {
 }
 
 #[cfg(windows)]
+fn poll_arrow_keys() -> (bool, bool) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LEFT, VK_RIGHT};
+    unsafe {
+        (
+            win_vk_down(VK_LEFT.0 as i32),
+            win_vk_down(VK_RIGHT.0 as i32),
+        )
+    }
+}
+
+#[cfg(not(windows))]
+fn poll_arrow_keys() -> (bool, bool) {
+    let _ = ();
+    (false, false)
+}
+
+#[cfg(windows)]
 fn poll_escape_down() -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
     unsafe { win_vk_down(VK_ESCAPE.0 as i32) }
@@ -755,12 +851,14 @@ fn spawn_global_mouse_listener(
         let mut middle_was_pressed = false;
         let mut shift_tracker = ShiftDoublePressTracker::new();
         let mut ctrl_tracker = CtrlTapTracker::new();
+        let mut memo_switch_tracker = MemoSwitchKeyTracker::new();
         let mut quick_copy_keys = QuickCopyKeyTracker::new();
 
         loop {
             let (coords, buttons) = poll_mouse_state();
             let (left_shift, right_shift) = poll_shift_keys();
             let (left_ctrl, right_ctrl) = poll_ctrl_keys();
+            let ctrl_pressed = left_ctrl || right_ctrl;
 
             if let Ok(mut pos) = listener_state.cursor.lock() {
                 pos.x = coords.0 as f64;
@@ -806,6 +904,7 @@ fn spawn_global_mouse_listener(
                 .map(|p| (p.x, p.y))
                 .unwrap_or((0.0, 0.0));
             shift_tracker.update(&app, left_shift, right_shift, cursor);
+            memo_switch_tracker.update(&app, ctrl_pressed);
             ctrl_tracker.update(&app, &quick_copy_state, left_ctrl, right_ctrl);
             quick_copy_keys.update(&app, &quick_copy_state, &equipped_state);
 

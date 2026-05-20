@@ -34,9 +34,67 @@ const MEMO_EVENT_TYPES = new Set<string>([
   'MEMO_BINDING_SET',
   'MEMO_EQUIPPED',
   'MEMO_UNEQUIPPED',
+  'MEMO_REORDER',
+  'FOCUSED_MEMO_CHANGED',
 ]);
 
 const MEMO_TOPIC_ID = '';
+const FOCUSED_MEMO_APP_STATE_KEY = 'currentFocusedMemoId';
+
+function getEquippedMemos(memos: Memo[]): Memo[] {
+  return memos
+    .filter((m) => m.equipped)
+    .sort((a, b) => a.equippedOrder - b.equippedOrder);
+}
+
+function getMaxEquippedOrder(memos: Memo[]): number {
+  return memos.reduce(
+    (max, m) => (m.equipped ? Math.max(max, m.equippedOrder) : max),
+    0,
+  );
+}
+
+function reindexEquippedOrders(memos: Memo[]): Memo[] {
+  const equipped = getEquippedMemos(memos);
+  const orderById = new Map(equipped.map((m, i) => [m.id, i + 1]));
+  return memos.map((m) => {
+    if (!m.equipped) {
+      return { ...m, equippedOrder: 0 };
+    }
+    return { ...m, equippedOrder: orderById.get(m.id) ?? 0 };
+  });
+}
+
+function findNextFocusedMemoId(memos: Memo[], unequippedId: string): string | null {
+  const equippedBefore = getEquippedMemos(memos);
+  const idx = equippedBefore.findIndex((m) => m.id === unequippedId);
+  if (idx === -1) {
+    return equippedBefore[0]?.id ?? null;
+  }
+  if (idx < equippedBefore.length - 1) {
+    return equippedBefore[idx + 1].id;
+  }
+  return equippedBefore[idx - 1]?.id ?? null;
+}
+
+function memoStatePatch(
+  memos: Memo[],
+  currentFocusedMemoId: string | null,
+): Pick<CanvasStore, 'memos' | 'equippedMemos' | 'currentFocusedMemoId'> {
+  return {
+    memos,
+    equippedMemos: getEquippedMemos(memos),
+    currentFocusedMemoId,
+  };
+}
+
+export async function saveFocusedMemoId(id: string | null): Promise<void> {
+  if (id === null) {
+    await db.app_state.delete(FOCUSED_MEMO_APP_STATE_KEY);
+  } else {
+    await db.app_state.put({ key: FOCUSED_MEMO_APP_STATE_KEY, value: id });
+  }
+}
 
 export interface CanvasStore {
   topicId: string;
@@ -45,6 +103,8 @@ export interface CanvasStore {
   edges: BusinessEdge[];
   experiences: Experience[];
   memos: Memo[];
+  currentFocusedMemoId: string | null;
+  equippedMemos: Memo[];
   undoStack: Command[];
   redoStack: Command[];
   dispatch: (command: Command) => void;
@@ -53,6 +113,7 @@ export interface CanvasStore {
   saveTopic: () => Promise<void>;
   loadTopic: (topicId: string) => Promise<void>;
   loadMemos: () => Promise<void>;
+  saveFocusedMemoId: (id: string | null) => Promise<void>;
 }
 
 let postLoadFitView: (() => void) | null = null;
@@ -433,6 +494,16 @@ async function recordMemoEvent(executed: Command): Promise<void> {
       await pushMemoEvent('MEMO_UNEQUIPPED', { memoId });
       break;
     }
+    case 'MEMO_REORDER': {
+      const { orderedIds } = executed.payload as { orderedIds: string[] };
+      await pushMemoEvent('MEMO_REORDER', { orderedIds });
+      break;
+    }
+    case 'FOCUSED_MEMO_CHANGED': {
+      const { memoId } = executed.payload as { memoId: string | null };
+      await pushMemoEvent('FOCUSED_MEMO_CHANGED', { memoId });
+      break;
+    }
     default:
       throw new Error(`recordMemoEvent: unsupported command "${executed.type}"`);
   }
@@ -711,7 +782,7 @@ function applyMemoStateChange(
         ? input.id
         : crypto.randomUUID();
     const memo = MemoSchema.parse({ ...input, id });
-    set((s) => ({ memos: [...s.memos, memo] }));
+    set((s) => memoStatePatch([...s.memos, memo], s.currentFocusedMemoId));
     return { type: 'MEMO_CREATED', payload: { memo } };
   }
 
@@ -719,18 +790,20 @@ function applyMemoStateChange(
     const id = command.payload?.id as string;
     const changes = command.payload?.changes as Partial<Memo>;
     findMemo(state.memos, id);
-    set((s) => ({
-      memos: s.memos.map((m) =>
-        m.id === id ? MemoSchema.parse({ ...m, ...changes }) : m,
-      ),
-    }));
+    const memos = state.memos.map((m) =>
+      m.id === id ? MemoSchema.parse({ ...m, ...changes }) : m,
+    );
+    set(() => memoStatePatch(memos, state.currentFocusedMemoId));
     return { type: 'MEMO_UPDATED', payload: { id, changes } };
   }
 
   if (command.type === 'MEMO_DELETED') {
     const id = command.payload?.id as string;
     findMemo(state.memos, id);
-    set((s) => ({ memos: s.memos.filter((m) => m.id !== id) }));
+    const memos = state.memos.filter((m) => m.id !== id);
+    const currentFocusedMemoId =
+      state.currentFocusedMemoId === id ? null : state.currentFocusedMemoId;
+    set(() => memoStatePatch(memos, currentFocusedMemoId));
     return { type: 'MEMO_DELETED', payload: { id } };
   }
 
@@ -738,60 +811,95 @@ function applyMemoStateChange(
     const memoId = command.payload?.memoId as string;
     const binding = command.payload?.binding as { key: number; label: string; text: string };
     findMemo(state.memos, memoId);
-    set((s) => ({
-      memos: s.memos.map((m) => {
-        if (m.id !== memoId) return m;
-        const withoutKey = m.bindings.filter((b) => b.key !== binding.key);
-        return MemoSchema.parse({
-          ...m,
-          bindings: [...withoutKey, binding],
-        });
-      }),
-    }));
+    const memos = state.memos.map((m) => {
+      if (m.id !== memoId) return m;
+      const withoutKey = m.bindings.filter((b) => b.key !== binding.key);
+      return MemoSchema.parse({
+        ...m,
+        bindings: [...withoutKey, binding],
+      });
+    });
+    set(() => memoStatePatch(memos, state.currentFocusedMemoId));
     return { type: 'MEMO_BINDING_SET', payload: { memoId, binding } };
   }
 
   if (command.type === 'MEMO_EQUIPPED') {
     const memoId = command.payload?.memoId as string;
     findMemo(state.memos, memoId);
-    set((s) => ({
-      memos: s.memos.map((m) => ({
-        ...m,
-        isEquipped: m.id === memoId,
-      })),
-    }));
+    const isFirstEquipped = state.memos.every((m) => !m.equipped);
+    const nextOrder = getMaxEquippedOrder(state.memos) + 1;
+    const memos = state.memos.map((m) =>
+      m.id === memoId ? { ...m, equipped: true, equippedOrder: nextOrder } : m,
+    );
+    const currentFocusedMemoId = isFirstEquipped ? memoId : state.currentFocusedMemoId;
+    set(() => memoStatePatch(memos, currentFocusedMemoId));
+    if (isFirstEquipped) {
+      void saveFocusedMemoId(memoId);
+    }
     return { type: 'MEMO_EQUIPPED', payload: { memoId } };
   }
 
   if (command.type === 'MEMO_UNEQUIPPED') {
     const memoId = command.payload?.memoId as string;
     findMemo(state.memos, memoId);
-    set((s) => ({
-      memos: s.memos.map((m) =>
-        m.id === memoId ? { ...m, isEquipped: false } : m,
-      ),
-    }));
+    const wasFocused = state.currentFocusedMemoId === memoId;
+    let memos = state.memos.map((m) =>
+      m.id === memoId ? { ...m, equipped: false, equippedOrder: 0 } : m,
+    );
+    memos = reindexEquippedOrders(memos);
+    let currentFocusedMemoId = state.currentFocusedMemoId;
+    if (wasFocused) {
+      currentFocusedMemoId = findNextFocusedMemoId(state.memos, memoId);
+      void saveFocusedMemoId(currentFocusedMemoId);
+    }
+    set(() => memoStatePatch(memos, currentFocusedMemoId));
     return { type: 'MEMO_UNEQUIPPED', payload: { memoId } };
+  }
+
+  if (command.type === 'MEMO_REORDER') {
+    const orderedIds = command.payload?.orderedIds as string[];
+    const orderById = new Map(orderedIds.map((id, i) => [id, i + 1]));
+    const memos = state.memos.map((m) => {
+      const order = orderById.get(m.id);
+      if (order === undefined) return m;
+      return { ...m, equipped: true, equippedOrder: order };
+    });
+    set(() => memoStatePatch(memos, state.currentFocusedMemoId));
+    return { type: 'MEMO_REORDER', payload: { orderedIds } };
+  }
+
+  if (command.type === 'FOCUSED_MEMO_CHANGED') {
+    const memoId = command.payload?.memoId as string | null;
+    void saveFocusedMemoId(memoId);
+    set((s) => memoStatePatch(s.memos, memoId));
+    return { type: 'FOCUSED_MEMO_CHANGED', payload: { memoId } };
   }
 
   throw new Error(`CanvasStore: unhandled memo command type "${command.type}"`);
 }
 
-async function syncEquippedMemoToBackend(executed: Command, memos: Memo[]): Promise<void> {
-  const equipped = memos.find((m) => m.isEquipped);
-  if (!equipped) return;
+async function syncEquippedMemoToBackend(
+  executed: Command,
+  memos: Memo[],
+  currentFocusedMemoId: string | null,
+): Promise<void> {
+  const focused =
+    (currentFocusedMemoId
+      ? memos.find((m) => m.id === currentFocusedMemoId)
+      : undefined) ?? getEquippedMemos(memos)[0];
+  if (!focused) return;
 
   if (executed.type === 'MEMO_UPDATED') {
     const { id } = executed.payload as { id: string };
-    if (id !== equipped.id) return;
+    if (id !== focused.id) return;
   } else if (executed.type === 'MEMO_BINDING_SET') {
     const { memoId } = executed.payload as { memoId: string };
-    if (memoId !== equipped.id) return;
+    if (memoId !== focused.id) return;
   } else {
     return;
   }
 
-  await notifyMemoEquipped(equipped);
+  await notifyMemoEquipped(focused);
 }
 
 async function persistMemoStateChange(executed: Command, memos: Memo[]): Promise<void> {
@@ -802,8 +910,7 @@ async function persistMemoStateChange(executed: Command, memos: Memo[]): Promise
       break;
     }
     case 'MEMO_UPDATED':
-    case 'MEMO_BINDING_SET':
-    case 'MEMO_UNEQUIPPED': {
+    case 'MEMO_BINDING_SET': {
       const { memoId, id } = executed.payload as { memoId?: string; id?: string };
       const targetId = memoId ?? id;
       if (!targetId) {
@@ -812,7 +919,9 @@ async function persistMemoStateChange(executed: Command, memos: Memo[]): Promise
       await upsertMemoRow(findMemo(memos, targetId));
       break;
     }
-    case 'MEMO_EQUIPPED': {
+    case 'MEMO_EQUIPPED':
+    case 'MEMO_UNEQUIPPED':
+    case 'MEMO_REORDER': {
       await Promise.all(memos.map((memo) => upsertMemoRow(memo)));
       break;
     }
@@ -821,6 +930,8 @@ async function persistMemoStateChange(executed: Command, memos: Memo[]): Promise
       await deleteMemoRow(id);
       break;
     }
+    case 'FOCUSED_MEMO_CHANGED':
+      break;
     default:
       throw new Error(`persistMemoStateChange: unsupported command "${executed.type}"`);
   }
@@ -836,7 +947,10 @@ function pushUndo(set: (fn: (state: CanvasStore) => Partial<CanvasStore>) => voi
 export async function loadMemos(): Promise<void> {
   const rows = await db.memos.toArray();
   const memos = rows.map(({ updated_at: _updatedAt, ...memo }) => MemoSchema.parse(memo));
-  useCanvasStore.setState({ memos });
+  const focusedRow = await db.app_state.get(FOCUSED_MEMO_APP_STATE_KEY);
+  const currentFocusedMemoId =
+    typeof focusedRow?.value === 'string' ? focusedRow.value : null;
+  useCanvasStore.setState(memoStatePatch(memos, currentFocusedMemoId));
 }
 
 export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
@@ -846,12 +960,15 @@ export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
   edges: [],
   experiences: [],
   memos: [],
+  currentFocusedMemoId: null,
+  equippedMemos: [],
   undoStack: [],
   redoStack: [],
 
   saveTopic,
   loadTopic,
   loadMemos,
+  saveFocusedMemoId,
 
   dispatch: (command: Command) => {
     if (MEMO_EVENT_TYPES.has(command.type)) {
@@ -861,7 +978,7 @@ export const useCanvasStore = createStore<CanvasStore>((set, get) => ({
           const memos = get().memos;
           await persistMemoStateChange(executed, memos);
           await recordMemoEvent(executed);
-          await syncEquippedMemoToBackend(executed, memos);
+          await syncEquippedMemoToBackend(executed, memos, get().currentFocusedMemoId);
         } catch (err) {
           console.error(err);
         }
